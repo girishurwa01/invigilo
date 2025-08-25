@@ -11,9 +11,17 @@
   "dependencies": {
     "@supabase/auth-helpers-nextjs": "^0.10.0",
     "@supabase/supabase-js": "^2.55.0",
+    "@tensorflow-models/coco-ssd": "^2.2.2",
+    "@tensorflow-models/face-detection": "^1.0.2",
+    "@tensorflow/tfjs": "^4.12.0",
+    "@tensorflow/tfjs-backend-webgl": "^4.12.0",
+    "@tensorflow/tfjs-converter": "^4.12.0",
+    "@tensorflow/tfjs-core": "^4.12.0",
+    "faceapi": "^1.0.1",
     "next": "15.5.0",
     "react": "19.1.0",
-    "react-dom": "19.1.0"
+    "react-dom": "19.1.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
@@ -21,6 +29,7 @@
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/xlsx": "^0.0.35",
     "eslint": "^9",
     "eslint-config-next": "15.5.0",
     "tailwindcss": "^4",
