@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { User } from '@supabase/supabase-js'
@@ -29,6 +29,7 @@ interface Attempt {
   total_points: number
   time_taken: number | null
   completed_at: string | null
+  started_at: string
   user: {
     full_name: string | null
     email: string
@@ -41,8 +42,41 @@ interface Attempt {
   }
 }
 
-// Define the exact structure that Supabase returns
-interface SupabaseAttemptResponse {
+interface StudentAttempt {
+  id: string
+  test_id: string
+  score: number
+  total_points: number
+  time_taken: number | null
+  completed_at: string | null
+  started_at: string
+  test: {
+    id: string
+    title: string
+    test_code: string
+    show_results: boolean
+    created_by: string
+    created_by_name: string
+  }
+}
+
+interface LeaderboardEntry {
+  id: string
+  user_id: string
+  score: number
+  total_questions: number
+  total_points: number
+  completed_at: string
+  profiles: {
+    full_name: string | null
+    email: string
+  }
+  rank: number
+  percentage: string
+  isCurrentUser: boolean
+}
+
+interface RawTestAttempt {
   id: string
   test_id: string
   user_id: string
@@ -50,16 +84,23 @@ interface SupabaseAttemptResponse {
   total_questions: number
   time_taken: number | null
   completed_at: string | null
-  profiles: {
-    full_name: string | null
-    email: string
-  }[] // Supabase returns this as an array
-  tests: {
-    title: string
-    test_code: string
-    time_limit: number
-    total_questions: number
-  }[] // Supabase returns this as an array
+  started_at: string
+}
+
+interface RawTestData {
+  id: string
+  title: string
+  test_code: string
+  show_results: boolean
+  created_by: string
+  time_limit: number
+  total_questions: number
+}
+
+interface RawProfileData {
+  id: string
+  full_name: string | null
+  email: string
 }
 
 export default function ViewMarksPage() {
@@ -67,135 +108,370 @@ export default function ViewMarksPage() {
   const [loading, setLoading] = useState(true)
   const [tests, setTests] = useState<Test[]>([])
   const [attempts, setAttempts] = useState<Attempt[]>([])
-  const [activeTab, setActiveTab] = useState<'tests' | 'attempts'>('tests')
+  const [studentAttempts, setStudentAttempts] = useState<StudentAttempt[]>([])
+  const [activeTab, setActiveTab] = useState<'tests' | 'attempts' | 'my-attempts'>('tests')
   const [selectedTestId, setSelectedTestId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sortBy, setSortBy] = useState<'score-desc' | 'name-asc' | 'date-desc'>('score-desc')
   const [showLeaderboard, setShowLeaderboard] = useState<boolean>(false)
+  const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
   const router = useRouter()
 
-  useEffect(() => {
-    const getSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session?.user) {
-        router.push('/login')
+  // Load student's own attempts with improved data fetching
+  const loadStudentAttempts = useCallback(async (userId: string) => {
+    try {
+      setError(null)
+      
+      // Step 1: Get the student's test attempts
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('*')
+        .eq('user_id', userId)
+        .order('started_at', { ascending: false })
+
+      if (attemptError) throw attemptError
+      
+      if (!attemptData || attemptData.length === 0) {
+        setStudentAttempts([])
         return
       }
-      setUser(session.user)
-      await Promise.all([
-        fetchTests(session.user.id),
-        fetchAttempts(session.user.id)
-      ])
-      setLoading(false)
-    }
 
-    getSession()
+      // Step 2: Get unique test IDs
+      const testIds = [...new Set(attemptData.map(attempt => attempt.test_id))]
+      
+      // Step 3: Get test details
+      const { data: testsData, error: testsError } = await supabase
+        .from('tests')
+        .select('id, title, test_code, show_results, created_by, time_limit, total_questions')
+        .in('id', testIds)
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (!session?.user) {
-          router.push('/login')
-        } else {
-          setUser(session.user)
-          await Promise.all([
-            fetchTests(session.user.id),
-            fetchAttempts(session.user.id)
-          ])
-        }
+      if (testsError) throw testsError
+
+      // Step 4: Get creator profiles
+      const creatorIds = [...new Set(testsData?.map(test => test.created_by) || [])]
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', creatorIds)
+
+      if (profilesError) throw profilesError
+
+      // Step 5: Get total points for each test
+      const { data: questionsData, error: questionsError } = await supabase
+        .from('questions')
+        .select('test_id, points')
+        .in('test_id', testIds)
+
+      if (questionsError) throw questionsError
+
+      // Create lookup maps
+      const testsMap = new Map(testsData?.map(test => [test.id, test]) || [])
+      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+      const pointsMap = new Map<string, number>()
+
+      // Calculate total points for each test
+      if (questionsData) {
+        questionsData.forEach(q => {
+          const currentPoints = pointsMap.get(q.test_id) || 0
+          pointsMap.set(q.test_id, currentPoints + (q.points || 1))
+        })
       }
-    )
 
-    return () => subscription.unsubscribe()
-  }, [router])
+      // Step 6: Transform the data
+      const transformedAttempts: StudentAttempt[] = attemptData.map(attempt => {
+        const test = testsMap.get(attempt.test_id)
+        const creator = test ? profilesMap.get(test.created_by) : null
+        const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
 
-  const fetchTests = async (userId: string) => {
+        return {
+          id: attempt.id,
+          test_id: attempt.test_id,
+          score: attempt.score,
+          total_points: totalPoints,
+          time_taken: attempt.time_taken,
+          completed_at: attempt.completed_at,
+          started_at: attempt.started_at,
+          test: {
+            id: test?.id || attempt.test_id,
+            title: test?.title || 'Unknown Test',
+            test_code: test?.test_code || 'N/A',
+            show_results: test?.show_results ?? false,
+            created_by: test?.created_by || '',
+            created_by_name: creator?.full_name || creator?.email || 'Unknown Teacher'
+          }
+        }
+      })
+
+      setStudentAttempts(transformedAttempts)
+    } catch (error) {
+      console.error('Error loading student attempts:', error)
+      setError('Failed to load your test attempts')
+    }
+  }, [])
+
+  // Load test leaderboard with improved data fetching
+  const loadTestLeaderboard = useCallback(async (testId: string) => {
     try {
-      const { data, error } = await supabase
+      // Step 1: Get completed attempts for the test
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('*')
+        .eq('test_id', testId)
+        .not('completed_at', 'is', null)
+        .order('score', { ascending: false })
+        .limit(10)
+
+      if (attemptError) throw attemptError
+      
+      if (!attemptData || attemptData.length === 0) {
+        setLeaderboardData([])
+        return
+      }
+
+      // Step 2: Get user profiles
+      const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', userIds)
+
+      if (profilesError) throw profilesError
+
+      // Step 3: Get total points for the test
+      const { data: questionsData, error: questionsError } = await supabase
+        .from('questions')
+        .select('points')
+        .eq('test_id', testId)
+
+      if (questionsError) throw questionsError
+
+      const totalPoints = questionsData?.reduce((sum, q) => sum + (q.points || 1), 0) || 0
+
+      // Create profiles lookup
+      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+
+      // Transform data
+      const transformedLeaderboard: LeaderboardEntry[] = attemptData.map((attempt, index) => {
+        const profile = profilesMap.get(attempt.user_id)
+        const effectiveTotalPoints = totalPoints || attempt.total_questions
+        
+        return {
+          id: attempt.id,
+          user_id: attempt.user_id,
+          score: attempt.score,
+          total_questions: attempt.total_questions,
+          total_points: effectiveTotalPoints,
+          completed_at: attempt.completed_at!,
+          profiles: {
+            full_name: profile?.full_name || null,
+            email: profile?.email || 'Unknown'
+          },
+          rank: index + 1,
+          percentage: effectiveTotalPoints > 0 ? ((attempt.score / effectiveTotalPoints) * 100).toFixed(1) : '0.0',
+          isCurrentUser: attempt.user_id === user?.id
+        }
+      })
+
+      setLeaderboardData(transformedLeaderboard)
+    } catch (error) {
+      console.error('Error loading leaderboard:', error)
+      setLeaderboardData([])
+    }
+  }, [user?.id])
+
+  // Optimized data loading function with improved error handling
+  const loadAllData = useCallback(async (userId: string) => {
+    try {
+      setError(null)
+      
+      // Step 1: Load user's tests
+      const { data: testsData, error: testsError } = await supabase
         .from('tests')
         .select('*')
         .eq('created_by', userId)
         .order('created_at', { ascending: false })
 
-      if (error) throw error
-      setTests(data || [])
-    } catch (error) {
-      console.error('Error fetching tests:', error)
-      setError('Failed to load tests')
-    }
-  }
+      if (testsError) throw testsError
+      
+      setTests(testsData || [])
 
-  const fetchAttempts = async (userId: string) => {
-    try {
-      const { data, error } = await supabase
-        .from('test_attempts')
-        .select(`
-          id,
-          test_id,
-          user_id,
-          score,
-          total_questions,
-          time_taken,
-          completed_at,
-          profiles!test_attempts_user_id_fkey (
-            full_name,
-            email
-          ),
-          tests!test_attempts_test_id_fkey (
-            title,
-            test_code,
-            time_limit,
-            total_questions
-          )
-        `)
-        .eq('tests.created_by', userId)
-        .order('completed_at', { ascending: false })
-
-      if (error) throw error
-
-      // Get total points for each test by summing question points
-      const testIds = [...new Set((data || []).map((attempt: SupabaseAttemptResponse) => attempt.test_id))]
-      const testPointsMap = new Map<string, number>()
-
-      for (const testId of testIds) {
-        const { data: questionsData, error: questionsError } = await supabase
-          .from('questions')
-          .select('points')
-          .eq('test_id', testId)
-
-        if (!questionsError && questionsData) {
-          const totalPoints = questionsData.reduce((sum, q) => sum + q.points, 0)
-          testPointsMap.set(testId, totalPoints)
-        }
+      if (!testsData || testsData.length === 0) {
+        setAttempts([])
+        return
       }
 
-      // Transform the data to match the Attempt interface
-      const transformedData: Attempt[] = (data || []).map((attempt: SupabaseAttemptResponse) => ({
-        id: attempt.id,
-        test_id: attempt.test_id,
-        user_id: attempt.user_id,
-        score: attempt.score,
-        total_questions: attempt.total_questions,
-        total_points: testPointsMap.get(attempt.test_id) || attempt.total_questions,
-        time_taken: attempt.time_taken,
-        completed_at: attempt.completed_at,
-        user: {
-          full_name: attempt.profiles?.[0]?.full_name || null,
-          email: attempt.profiles?.[0]?.email || ''
-        },
-        tests: {
-          title: attempt.tests?.[0]?.title || '',
-          test_code: attempt.tests?.[0]?.test_code || '',
-          time_limit: attempt.tests?.[0]?.time_limit || 0,
-          total_questions: attempt.tests?.[0]?.total_questions || 0
-        }
-      }))
+      const userTestIds = testsData.map(test => test.id)
 
-      setAttempts(transformedData)
+      // Step 2: Get all attempts for user's tests
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('*')
+        .in('test_id', userTestIds)
+        .order('started_at', { ascending: false })
+
+      if (attemptError) throw attemptError
+
+      if (!attemptData || attemptData.length === 0) {
+        setAttempts([])
+        return
+      }
+
+      // Step 3: Get user profiles for attempt makers
+      const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', userIds)
+
+      if (profilesError) throw profilesError
+
+      // Step 4: Get total points for each test
+      const { data: questionsData, error: questionsError } = await supabase
+        .from('questions')
+        .select('test_id, points')
+        .in('test_id', userTestIds)
+
+      if (questionsError) throw questionsError
+
+      // Create lookup maps
+      const testsMap = new Map(testsData.map(test => [test.id, test]))
+      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+      const pointsMap = new Map<string, number>()
+
+      // Calculate total points for each test
+      if (questionsData) {
+        questionsData.forEach(q => {
+          const currentPoints = pointsMap.get(q.test_id) || 0
+          pointsMap.set(q.test_id, currentPoints + (q.points || 1))
+        })
+      }
+
+      // Transform attempts data
+      const transformedAttempts: Attempt[] = attemptData.map(attempt => {
+        const test = testsMap.get(attempt.test_id)
+        const profile = profilesMap.get(attempt.user_id)
+        const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
+
+        return {
+          id: attempt.id,
+          test_id: attempt.test_id,
+          user_id: attempt.user_id,
+          score: attempt.score,
+          total_questions: attempt.total_questions,
+          total_points: totalPoints,
+          time_taken: attempt.time_taken,
+          completed_at: attempt.completed_at,
+          started_at: attempt.started_at,
+          user: {
+            full_name: profile?.full_name || null,
+            email: profile?.email || 'Unknown'
+          },
+          tests: {
+            title: test?.title || 'Unknown Test',
+            test_code: test?.test_code || 'N/A',
+            time_limit: test?.time_limit || 0,
+            total_questions: test?.total_questions || 0
+          }
+        }
+      })
+
+      setAttempts(transformedAttempts)
     } catch (error) {
-      console.error('Error fetching attempts:', error)
-      setError('Failed to load test attempts')
+      console.error('Error loading data:', error)
+      setError('Failed to load data. Please refresh the page.')
     }
-  }
+  }, [])
+
+  // Initialize component
+  useEffect(() => {
+    let isMounted = true
+    let isLoading = false
+    
+    const getSession = async () => {
+      if (isLoading) return
+      isLoading = true
+      
+      try {
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession()
+        
+        if (sessionError) {
+          console.error('Session error:', sessionError)
+          if (isMounted) router.push('/login')
+          return
+        }
+        
+        if (!session?.user) {
+          if (isMounted) router.push('/login')
+          return
+        }
+        
+        if (isMounted) {
+          setUser(session.user)
+          setError(null)
+          await Promise.all([
+            loadAllData(session.user.id),
+            loadStudentAttempts(session.user.id)
+          ])
+        }
+        
+      } catch (error) {
+        console.error('Error in getSession:', error)
+        if (isMounted) setError('Failed to load session. Please refresh the page.')
+      } finally {
+        isLoading = false
+        if (isMounted) setLoading(false)
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && user && !isLoading) {
+        setLoading(true)
+        Promise.all([
+          loadAllData(user.id),
+          loadStudentAttempts(user.id)
+        ]).finally(() => {
+          if (isMounted) setLoading(false)
+        })
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    getSession()
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, session) => {
+        if (!isMounted || isLoading) return
+        
+        if (!session?.user) {
+          router.push('/login')
+        } else if (session.user.id !== user?.id) {
+          setUser(session.user)
+          isLoading = true
+          setLoading(true)
+          try {
+            await Promise.all([
+              loadAllData(session.user.id),
+              loadStudentAttempts(session.user.id)
+            ])
+          } catch (error) {
+            console.error('Error in auth state change:', error)
+            if (isMounted) setError('Failed to reload data')
+          } finally {
+            isLoading = false
+            if (isMounted) setLoading(false)
+          }
+        }
+      }
+    )
+
+    return () => {
+      isMounted = false
+      isLoading = false
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      subscription.unsubscribe()
+    }
+  }, [router, user?.id, loadAllData, loadStudentAttempts])
 
   const deleteTest = async (testId: string) => {
     if (!confirm('Are you sure you want to delete this test? This action cannot be undone.')) {
@@ -212,6 +488,12 @@ export default function ViewMarksPage() {
       if (error) throw error
 
       setTests(tests.filter(test => test.id !== testId))
+      setAttempts(attempts.filter(attempt => attempt.test_id !== testId))
+      
+      if (selectedTestId === testId) {
+        setSelectedTestId(null)
+      }
+      
       alert('Test deleted successfully!')
     } catch (error) {
       console.error('Error deleting test:', error)
@@ -255,13 +537,11 @@ export default function ViewMarksPage() {
     return ((score / totalPoints) * 100).toFixed(1)
   }
 
-  // Get attempts for selected test only
   const selectedTestAttempts = useMemo(() => {
     if (!selectedTestId) return []
     return attempts.filter(attempt => attempt.test_id === selectedTestId)
   }, [attempts, selectedTestId])
 
-  // Get selected test details
   const selectedTest = useMemo(() => {
     if (!selectedTestId) return null
     return tests.find(test => test.id === selectedTestId) || null
@@ -270,29 +550,28 @@ export default function ViewMarksPage() {
   const sortAttempts = (atts: Attempt[]) => {
     return [...atts].sort((a, b) => {
       if (sortBy === 'score-desc') {
-        return b.score - a.score;
+        return b.score - a.score
       }
       if (sortBy === 'name-asc') {
-        return (a.user.full_name || a.user.email).localeCompare(b.user.full_name || b.user.email);
+        return (a.user.full_name || a.user.email).localeCompare(b.user.full_name || b.user.email)
       }
       if (sortBy === 'date-desc') {
-        const aTime = a.completed_at ? new Date(a.completed_at).getTime() : 0;
-        const bTime = b.completed_at ? new Date(b.completed_at).getTime() : 0;
-        return bTime - aTime;
+        const aTime = a.completed_at ? new Date(a.completed_at).getTime() : new Date(a.started_at).getTime()
+        const bTime = b.completed_at ? new Date(b.completed_at).getTime() : new Date(b.started_at).getTime()
+        return bTime - aTime
       }
-      return 0;
-    });
-  };
+      return 0
+    })
+  }
 
   const getLeaderboard = (atts: Attempt[]) => {
-    const completed = atts.filter((a) => a.completed_at !== null);
-    const sorted = [...completed].sort((a, b) => b.score - a.score);
-    return sorted.slice(0, 3);
-  };
+    const completed = atts.filter((a) => a.completed_at !== null)
+    const sorted = [...completed].sort((a, b) => b.score - a.score)
+    return sorted.slice(0, 3)
+  }
 
   const downloadResults = (testAttempts: Attempt[], testTitle: string) => {
-    // Sort the attempts according to current sort preference before exporting
-    const sortedAttempts = sortAttempts(testAttempts);
+    const sortedAttempts = sortAttempts(testAttempts)
     
     const data = sortedAttempts.map((a) => ({
       Name: a.user.full_name || 'Anonymous',
@@ -300,16 +579,16 @@ export default function ViewMarksPage() {
       Score: `${a.score} / ${a.total_points}`,
       Percentage: `${calculatePercentage(a.score, a.total_points)}%`,
       'Time Taken': a.time_taken ? `${a.time_taken} min` : 'N/A',
+      'Started At': formatDate(a.started_at),
       'Completed At': a.completed_at ? formatDate(a.completed_at) : 'In Progress',
-    }));
+    }))
     
-    const ws = XLSX.utils.json_to_sheet(data);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Results');
-    XLSX.writeFile(wb, `${testTitle.replace(/\s+/g, '_')}_results.xlsx`);
-  };
+    const ws = XLSX.utils.json_to_sheet(data)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Results')
+    XLSX.writeFile(wb, `${testTitle.replace(/\s+/g, '_')}_results.xlsx`)
+  }
 
-  // Get tests with attempt counts
   const testsWithAttempts = useMemo(() => {
     return tests.map(test => ({
       ...test,
@@ -317,10 +596,19 @@ export default function ViewMarksPage() {
     }))
   }, [tests, attempts])
 
+  const handleViewLeaderboard = async (testId: string) => {
+    await loadTestLeaderboard(testId)
+    setSelectedTestId(testId)
+    setShowLeaderboard(true)
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading...</div>
+        <div className="flex flex-col items-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+          <div className="text-xl text-gray-600 mt-4">Loading...</div>
+        </div>
       </div>
     )
   }
@@ -353,7 +641,7 @@ export default function ViewMarksPage() {
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Dashboard</h1>
-          <p className="text-gray-600">Manage your tests and view student results</p>
+          <p className="text-gray-600">Manage your tests, view results, and track your progress</p>
         </div>
 
         {error && (
@@ -370,6 +658,7 @@ export default function ViewMarksPage() {
                 onClick={() => {
                   setActiveTab('tests')
                   setSelectedTestId(null)
+                  setShowLeaderboard(false)
                 }}
                 className={`py-4 px-6 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === 'tests'
@@ -383,6 +672,7 @@ export default function ViewMarksPage() {
                 onClick={() => {
                   setActiveTab('attempts')
                   setSelectedTestId(null)
+                  setShowLeaderboard(false)
                 }}
                 className={`py-4 px-6 text-sm font-medium border-b-2 transition-colors ${
                   activeTab === 'attempts'
@@ -391,6 +681,20 @@ export default function ViewMarksPage() {
                 }`}
               >
                 View Results ({attempts.length} total attempts)
+              </button>
+              <button
+                onClick={() => {
+                  setActiveTab('my-attempts')
+                  setSelectedTestId(null)
+                  setShowLeaderboard(false)
+                }}
+                className={`py-4 px-6 text-sm font-medium border-b-2 transition-colors ${
+                  activeTab === 'my-attempts'
+                    ? 'border-indigo-500 text-indigo-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                My Attempts ({studentAttempts.length})
               </button>
             </nav>
           </div>
@@ -437,6 +741,9 @@ export default function ViewMarksPage() {
                             Status
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Attempts
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Created
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -445,13 +752,13 @@ export default function ViewMarksPage() {
                         </tr>
                       </thead>
                       <tbody className="bg-white divide-y divide-gray-200">
-                        {tests.map((test) => (
+                        {testsWithAttempts.map((test) => (
                           <tr key={test.id} className="hover:bg-gray-50">
                             <td className="px-6 py-4 whitespace-nowrap">
                               <div>
                                 <div className="text-sm font-medium text-gray-900">{test.title}</div>
                                 {test.description && (
-                                  <div className="text-sm text-gray-500">{test.description}</div>
+                                  <div className="text-sm text-gray-500 truncate max-w-xs">{test.description}</div>
                                 )}
                               </div>
                             </td>
@@ -490,6 +797,11 @@ export default function ViewMarksPage() {
                                 </span>
                               </div>
                             </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                {test.attemptCount} attempts
+                              </span>
+                            </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                               {formatDate(test.created_at)}
                             </td>
@@ -500,6 +812,17 @@ export default function ViewMarksPage() {
                                     Edit
                                   </button>
                                 </Link>
+                                {test.attemptCount > 0 && (
+                                  <button
+                                    onClick={() => {
+                                      setSelectedTestId(test.id)
+                                      setActiveTab('attempts')
+                                    }}
+                                    className="text-blue-600 hover:text-blue-900 transition-colors"
+                                  >
+                                    View Results
+                                  </button>
+                                )}
                                 <button
                                   onClick={() => deleteTest(test.id)}
                                   className="text-red-600 hover:text-red-900 transition-colors"
@@ -512,6 +835,99 @@ export default function ViewMarksPage() {
                         ))}
                       </tbody>
                     </table>
+                  </div>
+                )}
+              </div>
+            ) : activeTab === 'my-attempts' ? (
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900 mb-6">My Test Attempts</h2>
+                
+                {studentAttempts.length === 0 ? (
+                  <div className="text-center py-12">
+                    <div className="text-gray-500 mb-4">You haven&apos;t attempted any tests yet</div>
+                    <Link href="/take-test">
+                      <button className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-lg transition-colors">
+                        Take a Test
+                      </button>
+                    </Link>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    {studentAttempts.map((attempt) => (
+                      <div key={attempt.id} className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
+                        <div className="flex justify-between items-start mb-4">
+                          <div>
+                            <h3 className="text-lg font-semibold text-gray-900">{attempt.test.title}</h3>
+                            <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
+                              <span>Code: {attempt.test.test_code}</span>
+                              <span>•</span>
+                              <span>By: {attempt.test.created_by_name}</span>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <div className="text-2xl font-bold text-gray-900">
+                              {attempt.score} / {attempt.total_points}
+                            </div>
+                            <div className={`text-sm font-medium ${
+                              parseFloat(calculatePercentage(attempt.score, attempt.total_points)) >= 70
+                                ? 'text-green-600'
+                                : parseFloat(calculatePercentage(attempt.score, attempt.total_points)) >= 50
+                                ? 'text-yellow-600'
+                                : 'text-red-600'
+                            }`}>
+                              {calculatePercentage(attempt.score, attempt.total_points)}%
+                            </div>
+                          </div>
+                        </div>
+                        
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                          <div>
+                            <div className="text-sm text-gray-500">Time Taken</div>
+                            <div className="font-medium">{attempt.time_taken ? `${attempt.time_taken} min` : 'N/A'}</div>
+                          </div>
+                          <div>
+                            <div className="text-sm text-gray-500">Started</div>
+                            <div className="font-medium">{formatDate(attempt.started_at)}</div>
+                          </div>
+                          <div>
+                            <div className="text-sm text-gray-500">Completed</div>
+                            <div className="font-medium">
+                              {attempt.completed_at ? formatDate(attempt.completed_at) : 'In Progress'}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-sm text-gray-500">Status</div>
+                            <div className={`font-medium ${
+                              attempt.completed_at ? 'text-green-600' : 'text-yellow-600'
+                            }`}>
+                              {attempt.completed_at ? 'Completed' : 'In Progress'}
+                            </div>
+                          </div>
+                        </div>
+
+                        {attempt.test.show_results && attempt.completed_at && (
+                          <div className="flex space-x-3">
+                            <button
+                              onClick={() => handleViewLeaderboard(attempt.test_id)}
+                              className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors text-sm"
+                            >
+                              View Leaderboard
+                            </button>
+                            <Link href={`/test-results/${attempt.id}`}>
+                              <button className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-lg transition-colors text-sm">
+                                View Detailed Results
+                              </button>
+                            </Link>
+                          </div>
+                        )}
+                        
+                        {!attempt.test.show_results && (
+                          <div className="text-sm text-gray-500 italic">
+                            Results are not available for this test
+                          </div>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -530,19 +946,28 @@ export default function ViewMarksPage() {
                         {testsWithAttempts.map((test) => (
                           <div
                             key={test.id}
-                            onClick={() => setSelectedTestId(test.id)}
-                            className="bg-white p-6 rounded-lg shadow-md border hover:shadow-lg cursor-pointer transition-shadow"
+                            onClick={() => test.attemptCount > 0 && setSelectedTestId(test.id)}
+                            className={`bg-white p-6 rounded-lg shadow-md border transition-shadow ${
+                              test.attemptCount > 0 
+                                ? 'hover:shadow-lg cursor-pointer' 
+                                : 'opacity-60 cursor-not-allowed'
+                            }`}
                           >
                             <h3 className="text-lg font-semibold text-gray-900 mb-2">{test.title}</h3>
-                            <p className="text-sm text-gray-600 mb-4">{test.description || 'No description'}</p>
+                            <p className="text-sm text-gray-600 mb-4 line-clamp-2">{test.description || 'No description'}</p>
                             <div className="flex justify-between items-center">
                               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                                 {test.test_code}
                               </span>
-                              <span className="text-sm text-gray-500">
+                              <span className={`text-sm font-medium ${
+                                test.attemptCount > 0 ? 'text-blue-600' : 'text-gray-500'
+                              }`}>
                                 {test.attemptCount} attempt{test.attemptCount !== 1 ? 's' : ''}
                               </span>
                             </div>
+                            {test.attemptCount === 0 && (
+                              <p className="text-xs text-gray-500 mt-2">No attempts yet</p>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -550,11 +975,13 @@ export default function ViewMarksPage() {
                   </div>
                 ) : (
                   <div>
-                    {/* Back button and test info */}
                     <div className="flex items-center mb-6">
                       <button
-                        onClick={() => setSelectedTestId(null)}
-                        className="mr-4 text-indigo-600 hover:text-indigo-800 transition-colors"
+                        onClick={() => {
+                          setSelectedTestId(null)
+                          setShowLeaderboard(false)
+                        }}
+                        className="mr-4 text-indigo-600 hover:text-indigo-800 transition-colors flex items-center"
                       >
                         ← Back to Tests
                       </button>
@@ -572,8 +999,7 @@ export default function ViewMarksPage() {
                       </div>
                     ) : (
                       <div>
-                        {/* Controls */}
-                        <div className="flex justify-between items-center mb-6">
+                        <div className="flex justify-between items-center mb-6 flex-wrap gap-4">
                           <div className="flex items-center space-x-4">
                             <label htmlFor="sortBy" className="text-sm font-medium text-gray-700">
                               Sort by:
@@ -606,13 +1032,12 @@ export default function ViewMarksPage() {
                           </div>
                         </div>
 
-                        {/* Leaderboard */}
                         {showLeaderboard && (
                           <div className="bg-gray-50 p-4 rounded-lg mb-6">
-                            <h4 className="text-md font-semibold text-gray-900 mb-4">🏆 Leaderboard</h4>
+                            <h4 className="text-md font-semibold text-gray-900 mb-4">Leaderboard</h4>
                             {(() => {
-                              const leaderboard = getLeaderboard(selectedTestAttempts);
-                              const medals = ['🥇', '🥈', '🥉'];
+                              const leaderboard = getLeaderboard(selectedTestAttempts)
+                              const medals = ['🥇', '🥈', '🥉']
                               
                               return leaderboard.length > 0 ? (
                                 <ul className="space-y-2">
@@ -632,12 +1057,11 @@ export default function ViewMarksPage() {
                                 </ul>
                               ) : (
                                 <div className="text-gray-500">No completed attempts yet</div>
-                              );
+                              )
                             })()}
                           </div>
                         )}
 
-                        {/* Results Table */}
                         <div className="overflow-x-auto">
                           <table className="min-w-full divide-y divide-gray-200">
                             <thead className="bg-gray-50">
@@ -695,6 +1119,34 @@ export default function ViewMarksPage() {
                             </tbody>
                           </table>
                         </div>
+
+                        <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div className="bg-blue-50 p-4 rounded-lg">
+                            <div className="text-2xl font-bold text-blue-600">
+                              {selectedTestAttempts.length}
+                            </div>
+                            <div className="text-sm text-gray-600">Total Attempts</div>
+                          </div>
+                          <div className="bg-green-50 p-4 rounded-lg">
+                            <div className="text-2xl font-bold text-green-600">
+                              {selectedTestAttempts.filter(a => a.completed_at).length}
+                            </div>
+                            <div className="text-sm text-gray-600">Completed</div>
+                          </div>
+                          <div className="bg-purple-50 p-4 rounded-lg">
+                            <div className="text-2xl font-bold text-purple-600">
+                              {selectedTestAttempts.length > 0 
+                                ? (selectedTestAttempts
+                                    .filter(a => a.completed_at)
+                                    .reduce((sum, a) => sum + parseFloat(calculatePercentage(a.score, a.total_points)), 0) / 
+                                   selectedTestAttempts.filter(a => a.completed_at).length
+                                  ).toFixed(1)
+                                : '0.0'
+                              }%
+                            </div>
+                            <div className="text-sm text-gray-600">Average Score</div>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -703,7 +1155,115 @@ export default function ViewMarksPage() {
             )}
           </div>
         </div>
+
+        {/* Leaderboard Modal */}
+        {showLeaderboard && selectedTestId && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-96 overflow-y-auto">
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">Test Leaderboard</h3>
+                <button
+                  onClick={() => {
+                    setShowLeaderboard(false)
+                    setSelectedTestId(null)
+                  }}
+                  className="text-gray-400 hover:text-gray-600 text-xl font-semibold"
+                >
+                  ×
+                </button>
+              </div>
+              
+              <LeaderboardComponent 
+                leaderboardData={leaderboardData} 
+                loading={false}
+              />
+            </div>
+          </div>
+        )}
       </div>
+    </div>
+  )
+}
+
+// Improved Leaderboard Component
+interface LeaderboardComponentProps {
+  leaderboardData: LeaderboardEntry[]
+  loading: boolean
+}
+
+function LeaderboardComponent({ leaderboardData, loading }: LeaderboardComponentProps) {
+  const formatDate = (dateString: string) => {
+    return new Date(dateString).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
+  if (loading) {
+    return (
+      <div className="text-center py-4">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-600 mx-auto mb-2"></div>
+        <div className="text-gray-500">Loading leaderboard...</div>
+      </div>
+    )
+  }
+
+  if (leaderboardData.length === 0) {
+    return (
+      <div className="text-center py-8">
+        <div className="text-gray-500 text-lg">No completed attempts yet</div>
+        <div className="text-gray-400 text-sm mt-2">Be the first to complete this test!</div>
+      </div>
+    )
+  }
+
+  const medals = ['🥇', '🥈', '🥉']
+
+  return (
+    <div className="space-y-3">
+      <div className="text-sm text-gray-600 mb-4">
+        Top {leaderboardData.length} performer{leaderboardData.length !== 1 ? 's' : ''}
+      </div>
+      
+      {leaderboardData.map((entry) => (
+        <div
+          key={entry.id}
+          className={`flex items-center justify-between p-4 rounded-lg border transition-colors ${
+            entry.isCurrentUser 
+              ? 'bg-indigo-50 border-indigo-200 shadow-sm' 
+              : 'bg-gray-50 border-gray-200'
+          }`}
+        >
+          <div className="flex items-center space-x-4">
+            <div className="text-2xl min-w-[3rem] text-center">
+              {entry.rank <= 3 ? medals[entry.rank - 1] : `#${entry.rank}`}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className={`font-medium truncate ${
+                entry.isCurrentUser ? 'text-indigo-900' : 'text-gray-900'
+              }`}>
+                {entry.profiles?.full_name || 'Anonymous'}
+                {entry.isCurrentUser && <span className="text-indigo-600 ml-2 font-normal">(You)</span>}
+              </div>
+              <div className="text-sm text-gray-600 truncate">{entry.profiles?.email}</div>
+            </div>
+          </div>
+          <div className="text-right">
+            <div className="font-bold text-gray-900">
+              {entry.score} / {entry.total_points}
+            </div>
+            <div className={`text-sm font-medium ${
+              parseFloat(entry.percentage) >= 70 ? 'text-green-600' :
+              parseFloat(entry.percentage) >= 50 ? 'text-yellow-600' : 'text-red-600'
+            }`}>
+              {entry.percentage}%
+            </div>
+            <div className="text-xs text-gray-500">{formatDate(entry.completed_at)}</div>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
