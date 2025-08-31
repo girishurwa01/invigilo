@@ -25,6 +25,23 @@ interface TestData {
   test_type: string
 }
 
+interface AIFeedback {
+  total_score: number;
+  breakdown: {
+      correctness?: number;
+      code_quality?: number;
+      efficiency?: number;
+      syntax?: number;
+      understanding?: number;
+  };
+  overall_feedback: string;
+  suggestions: string;
+  detailed_feedback?: {
+      [key: string]: FeedbackCriterion;
+  };
+}
+
+
 interface UserCodingAnswer {
   question_id: string
   code_submission: string
@@ -32,7 +49,21 @@ interface UserCodingAnswer {
   execution_time?: number
   memory_used?: number
   points_earned?: number
-  ai_feedback?: any
+  ai_feedback?: AIFeedback
+}
+
+interface TestResult {
+    compilationStatus: string;
+    executionTime?: number;
+    memoryUsed?: number;
+    totalScore: number;
+    maxScore: number;
+    aiFeedback: AIFeedback;
+}
+
+interface FeedbackCriterion {
+    score: number;
+    feedback: string;
 }
 
 const LANGUAGE_NAMES = {
@@ -74,14 +105,14 @@ export default function TakeCodingTestMain() {
   const [testStarted, setTestStarted] = useState(false)
   const [testSubmitted, setTestSubmitted] = useState(false)
   const [runningCode, setRunningCode] = useState(false)
-  const [testResults, setTestResults] = useState<any>(null)
+  const [testResults, setTestResults] = useState<TestResult | null>(null)
   const submissionInProgress = useRef(false)
   const router = useRouter()
 
   const loadTestData = useCallback(async (userId: string) => {
     try {
       console.log('Loading coding test data for user:', userId, 'test code:', code)
-     
+      
       // Get test information
       const { data: test, error: testError } = await supabase
         .from('tests')
@@ -90,9 +121,6 @@ export default function TakeCodingTestMain() {
         .eq('is_active', true)
         .eq('test_type', 'coding')
         .single()
-
-      console.log('Test query result:', test)
-      console.log('Test query error:', testError)
 
       if (testError || !test) {
         throw new Error('Coding test not found or inactive')
@@ -127,9 +155,6 @@ export default function TakeCodingTestMain() {
         .select('*')
         .eq('test_id', test.id)
         .order('question_number')
-
-      console.log('Questions query result:', questionsData)
-      console.log('Questions query error:', questionsError)
 
       if (questionsError) {
         console.error('Error loading questions:', questionsError)
@@ -174,7 +199,7 @@ export default function TakeCodingTestMain() {
     try {
       // Create test attempt first
       const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
-     
+      
       const { data: attempt, error: attemptError } = await supabase
         .from('test_attempts')
         .insert({
@@ -258,7 +283,7 @@ export default function TakeCodingTestMain() {
           return pointsEarned
         } catch (error) {
           console.error('Error grading question:', question.id, error)
-         
+          
           // Save error submission
           await supabase.from('user_coding_answers').insert({
             attempt_id: attempt.id,
@@ -268,7 +293,7 @@ export default function TakeCodingTestMain() {
             points_earned: 0,
             ai_feedback: 'Error occurred during grading'
           })
-         
+          
           return 0
         }
       })
@@ -286,7 +311,7 @@ export default function TakeCodingTestMain() {
       }
 
       const totalPossibleScore = questions.reduce((sum, q) => sum + (q.points || 5), 0)
-     
+      
       alert(
         reason === 'timeUp'
           ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
@@ -361,14 +386,11 @@ export default function TakeCodingTestMain() {
 
   const updateCode = (questionId: string, code: string) => {
     if (testSubmitted) return
-   
-    console.log('Updating code for question:', questionId, 'Code length:', code.length)
-   
+    
     setUserAnswers(prev => {
       const updated = prev.map(ua =>
         ua.question_id === questionId ? { ...ua, code_submission: code } : ua
       )
-      console.log('Updated user answers:', updated)
       return updated
     })
   }
@@ -376,7 +398,7 @@ export default function TakeCodingTestMain() {
   const runCode = async () => {
     const currentQ = questions[currentQuestion]
     const currentAnswer = userAnswers.find(ua => ua.question_id === currentQ?.id)
-   
+    
     if (!currentQ || !currentAnswer?.code_submission) {
       alert('Please write some code first!')
       return
@@ -406,7 +428,7 @@ export default function TakeCodingTestMain() {
       if (response.ok) {
         const result = await response.json()
         setTestResults(result)
-       
+        
         // Update user answer with test results
         setUserAnswers(prev =>
           prev.map(ua =>
@@ -505,7 +527,7 @@ export default function TakeCodingTestMain() {
             </div>
             <h1 className="text-3xl font-bold text-gray-900 mb-4">{testData.title}</h1>
             <p className="text-lg text-gray-600 mb-8">Coding Challenge</p>
-           
+            
             <div className="grid grid-cols-2 gap-4 mb-8 text-left bg-gray-50 rounded-lg p-6">
               <div>
                 <span className="text-sm text-gray-500">Questions</span>
@@ -524,12 +546,12 @@ export default function TakeCodingTestMain() {
                 <p className="font-semibold">{questions.reduce((sum, q) => sum + q.points, 0)} points</p>
               </div>
             </div>
-           
+            
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-8 text-left">
               <h3 className="font-semibold text-blue-800 mb-3">Coding Test Instructions</h3>
               <ul className="text-sm text-blue-700 space-y-2">
                 <li>• Write code in the provided editor for each question</li>
-                <li>• Test your code using the "Run & Grade" button to see your score</li>
+                <li>• Test your code using the &apos;Run & Grade&apos; button to see your score</li>
                 <li>• Your code will be evaluated by AI based on multiple criteria</li>
                 <li>• Each question has its own point value and programming language</li>
                 <li>• You can navigate between questions freely</li>
@@ -537,7 +559,7 @@ export default function TakeCodingTestMain() {
                 <li>• Submit before time runs out to avoid losing your work</li>
               </ul>
             </div>
-           
+            
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8 text-sm">
               <div className="bg-green-50 p-4 rounded-lg">
                 <h4 className="font-semibold text-green-800 mb-2">Supported Languages</h4>
@@ -558,7 +580,7 @@ export default function TakeCodingTestMain() {
                 </div>
               </div>
             </div>
-           
+            
             <button
               onClick={() => setTestStarted(true)}
               className="bg-green-600 hover:bg-green-700 text-white font-bold py-4 px-8 rounded-xl shadow-lg hover:shadow-xl transition-all duration-200"
@@ -626,7 +648,7 @@ export default function TakeCodingTestMain() {
                   const hasCode = answer?.code_submission && answer.code_submission.trim() !== defaultTemplate?.trim()
                   const isCurrent = index === currentQuestion
                   const hasBeenGraded = answer?.points_earned !== undefined && answer?.compilation_status !== 'Not Submitted'
-                 
+                  
                   return (
                     <button
                       key={index}
@@ -656,7 +678,7 @@ export default function TakeCodingTestMain() {
                   )
                 })}
               </div>
-             
+              
               {testResults && (
                 <div className="mt-6 p-4 bg-gray-50 rounded-lg">
                   <h4 className="font-semibold text-gray-900 mb-2">Latest Results</h4>
@@ -725,14 +747,15 @@ export default function TakeCodingTestMain() {
                   </button>
                 </div>
               </div>
-             
+              
               <CodeEditor
                 code={currentAnswer?.code_submission || DEFAULT_CODE_TEMPLATES[currentQ?.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || ''}
                 language={MONACO_LANGUAGES[currentQ?.language_id as keyof typeof MONACO_LANGUAGES] || 'javascript'}
                 height="500px"
                 onChange={(value) => {
-                  console.log('CodeEditor onChange triggered')
-                  updateCode(currentQ.id, value || '')
+                  if (currentQ) {
+                    updateCode(currentQ.id, value || '')
+                  }
                 }}
                 readOnly={testSubmitted}
               />
@@ -743,7 +766,7 @@ export default function TakeCodingTestMain() {
               <div className="bg-white rounded-lg shadow-md p-6">
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Detailed AI Evaluation</h3>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {Object.entries(testResults.aiFeedback.detailed_feedback).map(([criterion, data]: [string, any]) => (
+                  {Object.entries(testResults.aiFeedback.detailed_feedback).map(([criterion, data]: [string, FeedbackCriterion]) => (
                     <div key={criterion} className="bg-gray-50 p-4 rounded-lg">
                       <div className="flex justify-between items-center mb-2">
                         <h4 className="font-medium text-gray-800 capitalize">
