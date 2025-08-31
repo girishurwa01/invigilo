@@ -7,7 +7,7 @@ const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY!
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!
 
 /**
- * Pre-check 1: A new function to validate that the submitted code isn't empty or just comments.
+ * A new function to validate that the submitted code isn't empty or just comments.
  * This is the first line of defense against meaningless submissions.
  * @param code The user's submitted code.
  * @returns boolean True if the code has functional lines, false otherwise.
@@ -66,47 +66,46 @@ async function evaluateWithAI(userCode: string, languageId: number, question: an
         const model = genAI.getGenerativeModel({ 
             model: 'gemini-1.5-flash',
             generationConfig: {
-                temperature: 0.1,
-                topP: 0.8,
+                temperature: 0.2, // Slightly increased for more nuanced feedback
+                topP: 0.9,
                 topK: 40,
                 maxOutputTokens: 1024,
             }
         })
 
         const languageNames = { 50: 'C', 54: 'C++', 62: 'Java', 63: 'JavaScript', 71: 'Python' }
-        const languageName = languageNames[languageId as keyof typeof languageNames] || 'Unknown'
+        const languageName = languageNames[languageId as keyof typeof languageNames] || 'Unknown Language'
         
-        // Pre-check 2: The AI prompt is now much stricter.
-        // It's explicitly told to fail submissions that don't make a real attempt.
+        // MODIFIED PROMPT: Removed strict, punitive language. Focused on fair grading.
         const prompt = `
-         Your primary goal is to grade a user's code submission based on multiple criteria.
-
-         If the user's code is empty, contains only comments, is the default template code, or makes NO logical attempt to solve the problem BASED ON THE QUESTION, you MUST assign a 'total_score' of 0. You must also explain in the 'feedback' field that the submission was not a valid attempt.
-
-          Evaluate this ${languageName} code solution:
+          Your task is to act as a fair and helpful programming instructor. Grade the user's code solution for the given problem.
 
           PROBLEM STATEMENT: """${question.problem_statement}"""
 
-          USER'S CODE:
+          USER'S CODE (${languageName}):
           """
           ${userCode}
           """
           
-          The code has already been checked for basic compilation. Its status is: ${compilationStatus}.
+          The code's compilation status is: "${compilationStatus}".
 
-          Based on the problem statement and the user's code, provide a response in ONLY a valid JSON object format (no markdown, no extra text). The JSON object must have the following structure:
+          Please evaluate the code based on the problem's requirements and provide a response in a valid JSON object format ONLY.
+
+          GRADING CRITERIA (Total Score: ${question.points} points):
+          1.  **Correctness**: Does the code solve the problem correctly? This is the most important factor.
+          2.  **Efficiency & Quality**: Is the solution reasonably efficient and the code well-written?
+
+          Provide a JSON object with this exact structure:
           {
             "total_score": <integer from 0 to ${question.points}>,
-            "correctness_score": <integer from 0 to ${Math.round(question.points * 0.4)}>,
-            "quality_score": <integer from 0 to ${Math.round(question.points * 0.25)}>,
-            "efficiency_score": <integer from 0 to ${Math.round(question.points * 0.2)}>,
-            "syntax_score": <integer from 0 to ${Math.round(question.points * 0.1)}>,
-            "understanding_score": <integer from 0 to ${Math.round(question.points * 0.05)}>,
-            "feedback": "Provide brief, constructive feedback in under 100 words. Explain the reasoning for the scores.",
-            "suggestions": "Offer specific improvement tips in under 50 words."
-          }`
+            "feedback": "Provide brief, constructive feedback explaining the score. Focus on what the user did well and where they can improve.",
+            "suggestions": "Offer one or two specific tips for improvement."
+          }
 
-        console.log('Sending stricter prompt to Gemini...')
+          Base the 'total_score' primarily on correctness. A fully correct and working solution should receive the maximum score of ${question.points}. A partially correct solution should receive partial credit. If the code compiles but is logically incorrect, it should still receive at least 1 point for effort if it's a genuine attempt.
+        `
+
+        console.log('Sending lenient prompt to Gemini...')
         
         const result = await model.generateContent(prompt)
         const responseText = await result.response.text()
@@ -127,32 +126,12 @@ async function evaluateWithAI(userCode: string, languageId: number, question: an
             throw new Error('Invalid total_score in AI response')
         }
 
-        // Pre-check 3: Post-evaluation logic to enforce score dependency.
-        // If the code isn't correct, it can't be high quality or efficient.
-        let { 
-            total_score, correctness_score, quality_score, efficiency_score, syntax_score, understanding_score, feedback, suggestions 
-        } = parsed
+        // MODIFICATION: Removed the strict post-evaluation logic. We will trust the AI's score.
+        const { total_score, feedback, suggestions } = parsed
 
-        if (correctness_score < (question.points * 0.4 * 0.1)) { // If correctness is less than 10% of its possible score
-            console.log("Correctness score is near zero. Overriding secondary scores to prevent gaming the system.")
-            quality_score = 0
-            efficiency_score = 0
-            understanding_score = 0
-            feedback = "The solution was not correct, so points for code quality, efficiency, and problem understanding were not awarded. " + (feedback || "")
-            // Recalculate total score based on the override
-            total_score = correctness_score + syntax_score
-        }
-        
         return {
-            total_score: Math.min(total_score, question.points),
-            breakdown: {
-                correctness: correctness_score || 0,
-                code_quality: quality_score || 0,
-                efficiency: efficiency_score || 0,
-                syntax: syntax_score || 0,
-                understanding: understanding_score || 0
-            },
-            overall_feedback: feedback || 'Evaluation completed',
+            total_score: Math.min(total_score, question.points), // Ensure score doesn't exceed max points
+            overall_feedback: feedback || 'Evaluation completed.',
             suggestions: suggestions || 'Keep practicing!'
         }
         
@@ -187,7 +166,6 @@ export async function POST(request: Request) {
                 maxScore: question.points,
                 aiFeedback: {
                     total_score: 0,
-                    breakdown: {},
                     overall_feedback: 'Your submission was either empty or only contained comments. Please write a functional solution.',
                     suggestions: 'Start by writing code that attempts to solve the problem described.'
                 }
@@ -202,7 +180,8 @@ export async function POST(request: Request) {
             console.log('Step 1: Judge0 compilation check')
             const judgeResult = await runOnJudge0(languageId, userCode)
             
-            if (judgeResult.status.id <= 3) { // In Queue, Processing, Accepted
+            // Statuses 1 (In Queue), 2 (Processing), and 3 (Accepted) mean it compiled.
+            if (judgeResult.status.id <= 3) {
                 compilationStatus = 'Accepted'
                 executionTime = judgeResult.time ? parseFloat(judgeResult.time) * 1000 : 0
                 memoryUsed = judgeResult.memory || 0
@@ -223,13 +202,13 @@ export async function POST(request: Request) {
             totalScore = aiFeedback.total_score
         } catch (aiError) {
             console.error('AI evaluation failed:', aiError)
-            // Fallback scoring is now much less generous.
-            totalScore = (compilationStatus === 'Accepted') ? Math.round(question.points * 0.1) : 0 // Max 10% for just compiling
+            
+            // MODIFICATION: More lenient fallback scoring. Give 1 point if it compiles.
+            totalScore = (compilationStatus === 'Accepted' && question.points > 0) ? 1 : 0
             aiFeedback = {
                 total_score: totalScore,
-                breakdown: { syntax: totalScore },
-                overall_feedback: `AI evaluation was unavailable. Score is based solely on successful compilation.`,
-                suggestions: 'The code compiles, but its correctness and quality could not be determined.'
+                overall_feedback: `The AI grader is currently unavailable. Your score is based on successful compilation.`,
+                suggestions: 'Your code compiles successfully. Please try submitting again later for a full evaluation.'
             }
         }
 
@@ -254,3 +233,4 @@ export async function POST(request: Request) {
         }, { status: 500 })
     }
 }
+
