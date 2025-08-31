@@ -146,13 +146,12 @@ export default function TakeCodingTestMain() {
         return
       }
 
-      // Check for existing in-progress attempt
-      const { data: inProgressAttempt } = await supabase
+      // Check for existing in-progress attempt (or completed without proper cleanup)
+      const { data: existingAttempt } = await supabase
         .from('test_attempts')
-        .select('id, answers, started_at')
+        .select('id, answers, started_at, completed_at')
         .eq('test_id', test.id)
         .eq('user_id', userId)
-        .is('completed_at', null)
         .single()
 
       // Get questions from coding_questions table
@@ -175,20 +174,33 @@ export default function TakeCodingTestMain() {
       setQuestions(questionsData)
       
       // Initialize user answers
-      if (inProgressAttempt && inProgressAttempt.answers) {
+      if (existingAttempt && !existingAttempt.completed_at) {
         // Resume from saved progress
-        setUserAnswers(inProgressAttempt.answers as UserCodingAnswer[])
-        setCurrentAttemptId(inProgressAttempt.id)
+        const savedAnswers = existingAttempt.answers as UserCodingAnswer[] || []
+        
+        // Ensure all questions have answers
+        const completeAnswers = questionsData.map(q => {
+          const savedAnswer = savedAnswers.find(sa => sa.question_id === q.id)
+          return savedAnswer || {
+            question_id: q.id,
+            code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
+            compilation_status: 'Not Submitted',
+            points_earned: 0
+          }
+        })
+        
+        setUserAnswers(completeAnswers)
+        setCurrentAttemptId(existingAttempt.id)
         
         // Calculate remaining time
-        const startedAt = new Date(inProgressAttempt.started_at).getTime()
+        const startedAt = new Date(existingAttempt.started_at).getTime()
         const elapsed = (Date.now() - startedAt) / 1000
         const remaining = Math.max(0, test.time_limit * 60 - elapsed)
         setTimeLeft(Math.floor(remaining))
         
         console.log('Resumed test with remaining time:', Math.floor(remaining))
       } else {
-        // Start fresh
+        // Start fresh or existing attempt was completed
         const initialAnswers = questionsData.map(q => ({
           question_id: q.id,
           code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
@@ -197,6 +209,13 @@ export default function TakeCodingTestMain() {
         }))
         setUserAnswers(initialAnswers)
         setTimeLeft(test.time_limit * 60)
+        
+        // If there was a completed attempt, clear it for a fresh start
+        if (existingAttempt && existingAttempt.completed_at) {
+          setCurrentAttemptId(null)
+        } else if (existingAttempt) {
+          setCurrentAttemptId(existingAttempt.id)
+        }
       }
       
       setLoading(false)
@@ -213,31 +232,45 @@ export default function TakeCodingTestMain() {
 
     try {
       if (currentAttemptId) {
-        // Update existing attempt
+        // Update existing attempt with current answers and calculated score
+        const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
+        
         const { error } = await supabase
           .from('test_attempts')
-          .update({ answers: userAnswers })
+          .update({ 
+            answers: userAnswers,
+            score: currentScore // Update score in real-time
+          })
           .eq('id', currentAttemptId)
         
         if (error) throw error
+        console.log('Updated attempt with current score:', currentScore)
         return currentAttemptId
       } else {
-        // Create new attempt
+        // Create new attempt or handle the unique constraint
+        const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
+        
+        // Try to insert, but handle unique constraint violation
         const { data: attempt, error } = await supabase
           .from('test_attempts')
-          .insert({
+          .upsert({
             test_id: testData.id,
             user_id: user.id,
-            score: 0, // Will be calculated from individual question scores
+            score: currentScore,
             total_questions: questions.length,
             time_taken: 0, // Will be updated on submission
-            answers: userAnswers
+            answers: userAnswers,
+            started_at: new Date().toISOString(),
+            completed_at: null // Ensure it's not marked as completed yet
+          }, {
+            onConflict: 'test_id,user_id'
           })
           .select()
           .single()
 
         if (error) throw error
         setCurrentAttemptId(attempt.id)
+        console.log('Created/updated attempt with score:', currentScore)
         return attempt.id
       }
     } catch (error) {
@@ -248,6 +281,7 @@ export default function TakeCodingTestMain() {
 
   const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
     if (submissionInProgress.current || testSubmitted || !user || !testData) {
+      console.log('Submission blocked:', { submissionInProgress: submissionInProgress.current, testSubmitted, user: !!user, testData: !!testData })
       return
     }
 
@@ -259,6 +293,21 @@ export default function TakeCodingTestMain() {
     try {
       let attemptId = currentAttemptId
 
+      // Calculate total score from individual question scores
+      const totalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => {
+        return sum + (answer.points_earned || 0)
+      }, 0)
+
+      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
+      
+      console.log('Final submission - Total score:', totalScore)
+      console.log('Time taken:', timeTaken, 'minutes')
+      console.log('User answers breakdown:', userAnswers.map(ua => ({
+        question_id: ua.question_id,
+        points_earned: ua.points_earned,
+        compilation_status: ua.compilation_status
+      })))
+
       // Ensure we have an attempt record
       if (!attemptId) {
         attemptId = await createOrUpdateAttempt()
@@ -267,47 +316,28 @@ export default function TakeCodingTestMain() {
         }
       }
 
-      // Calculate total score from individual question scores
-      const totalScore = userAnswers.reduce((sum, answer) => {
-        return sum + (answer.points_earned || 0)
-      }, 0)
-
-      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
-      
-      console.log('Calculated total score from user answers:', totalScore)
-      console.log('User answers breakdown:', userAnswers.map(ua => ({
-        question_id: ua.question_id,
-        points_earned: ua.points_earned
-      })))
-
-      // Update test attempt with completion details
+      // Update test attempt with completion details - CRITICAL FIX
       const { error: updateError } = await supabase
         .from('test_attempts')
         .update({ 
           score: totalScore,
           time_taken: timeTaken,
-          completed_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(), // MARK AS COMPLETED
           answers: userAnswers
         })
         .eq('id', attemptId)
 
       if (updateError) {
         console.error('Error updating test attempt:', updateError)
-        throw new Error('Failed to save test completion')
+        throw new Error('Failed to save test completion: ' + updateError.message)
       }
+
+      console.log('Successfully marked test as completed with score:', totalScore)
 
       // Save final answers to user_coding_answers table for each question
       for (const answer of userAnswers) {
         const question = questions.find(q => q.id === answer.question_id)
         if (!question) continue
-
-        // Check if answer already exists for this attempt and question
-        const { data: existingAnswer } = await supabase
-          .from('user_coding_answers')
-          .select('id')
-          .eq('attempt_id', attemptId)
-          .eq('question_id', answer.question_id)
-          .single()
 
         const answerData = {
           attempt_id: attemptId,
@@ -320,42 +350,34 @@ export default function TakeCodingTestMain() {
           ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null
         }
 
-        if (existingAnswer) {
-          // Update existing answer
-          const { error } = await supabase
-            .from('user_coding_answers')
-            .update(answerData)
-            .eq('id', existingAnswer.id)
-          
-          if (error) {
-            console.error('Error updating coding answer:', error)
-          }
+        // Use upsert to handle duplicates
+        const { error } = await supabase
+          .from('user_coding_answers')
+          .upsert(answerData, {
+            onConflict: 'attempt_id,question_id'
+          })
+        
+        if (error) {
+          console.error('Error saving coding answer:', error)
         } else {
-          // Insert new answer
-          const { error } = await supabase
-            .from('user_coding_answers')
-            .insert(answerData)
-          
-          if (error) {
-            console.error('Error inserting coding answer:', error)
-          }
+          console.log('Saved answer for question:', answer.question_id, 'with points:', answer.points_earned)
         }
       }
 
       // Verify the final score was saved correctly
       const { data: verifyAttempt, error: verifyError } = await supabase
         .from('test_attempts')
-        .select('score')
+        .select('score, completed_at, time_taken')
         .eq('id', attemptId)
         .single()
 
       if (verifyError) {
-        console.error('Error verifying score:', verifyError)
+        console.error('Error verifying final submission:', verifyError)
       } else {
-        console.log('Final verified score:', verifyAttempt.score)
+        console.log('Final verification - Score:', verifyAttempt.score, 'Completed:', verifyAttempt.completed_at, 'Time taken:', verifyAttempt.time_taken)
       }
 
-      const totalPossibleScore = questions.reduce((sum, q) => sum + (q.points || 5), 0)
+      const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
       
       alert(
         reason === 'timeUp'
@@ -366,7 +388,7 @@ export default function TakeCodingTestMain() {
       // Wait a moment before redirecting to ensure all database operations complete
       setTimeout(() => {
         router.push('/view-marks')
-      }, 1000)
+      }, 2000) // Increased timeout
 
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -436,8 +458,8 @@ export default function TakeCodingTestMain() {
   const updateCode = (questionId: string, code: string) => {
     if (testSubmitted) return
     
-    setUserAnswers(prev => {
-      const updated = prev.map(ua =>
+    setUserAnswers((prev: UserCodingAnswer[]) => {
+      const updated = prev.map((ua: UserCodingAnswer) =>
         ua.question_id === questionId ? { ...ua, code_submission: code } : ua
       )
       return updated
@@ -485,21 +507,22 @@ export default function TakeCodingTestMain() {
         
         const pointsEarned = Math.max(0, Math.min(currentQ.points, result.totalScore || 0))
         
-        // Update user answer with test results - THIS IS THE KEY PART
-        setUserAnswers(prev =>
-          prev.map(ua =>
+        // Update user answer with test results
+        setUserAnswers((prev: UserCodingAnswer[]) => {
+          const updated = prev.map((ua: UserCodingAnswer) =>
             ua.question_id === currentQ.id ? {
               ...ua,
               compilation_status: result.compilationStatus,
               execution_time: result.executionTime,
               memory_used: result.memoryUsed,
-              points_earned: pointsEarned, // Update the points earned for this question
+              points_earned: pointsEarned,
               ai_feedback: result.aiFeedback
             } : ua
           )
-        )
+          return updated
+        })
 
-        // Save or update this question's answer in the database immediately
+        // Save this individual question's answer immediately
         if (currentAttemptId) {
           const answerData = {
             attempt_id: currentAttemptId,
@@ -512,37 +535,37 @@ export default function TakeCodingTestMain() {
             ai_feedback: JSON.stringify(result.aiFeedback)
           }
 
-          // Check if answer already exists
-          const { data: existingAnswer } = await supabase
+          // Use upsert to handle the unique constraint
+          const { error } = await supabase
             .from('user_coding_answers')
-            .select('id')
-            .eq('attempt_id', currentAttemptId)
-            .eq('question_id', currentQ.id)
-            .single()
-
-          if (existingAnswer) {
-            // Update existing answer
-            const { error } = await supabase
-              .from('user_coding_answers')
-              .update(answerData)
-              .eq('id', existingAnswer.id)
-            
-            if (error) {
-              console.error('Error updating individual answer:', error)
-            } else {
-              console.log('Updated answer for question:', currentQ.id, 'with points:', pointsEarned)
-            }
+            .upsert(answerData, {
+              onConflict: 'attempt_id,question_id'
+            })
+          
+          if (error) {
+            console.error('Error saving individual answer:', error)
           } else {
-            // Insert new answer
-            const { error } = await supabase
-              .from('user_coding_answers')
-              .insert(answerData)
-            
-            if (error) {
-              console.error('Error saving individual answer:', error)
-            } else {
-              console.log('Saved new answer for question:', currentQ.id, 'with points:', pointsEarned)
+            console.log('Saved answer for question:', currentQ.id, 'with points:', pointsEarned)
+          }
+
+          // Calculate the new total score
+          const totalScore = userAnswers.reduce((sum: number, ua: UserCodingAnswer) => {
+            if (ua.question_id === currentQ.id) {
+              return sum + pointsEarned
             }
+            return sum + (ua.points_earned || 0)
+          }, 0)
+
+          // Update the attempt with the new total score
+          const { error: scoreUpdateError } = await supabase
+            .from('test_attempts')
+            .update({ score: totalScore })
+            .eq('id', currentAttemptId)
+
+          if (scoreUpdateError) {
+            console.error('Error updating total score:', scoreUpdateError)
+          } else {
+            console.log('Updated total score in test_attempts:', totalScore)
           }
         }
       } else {
@@ -638,7 +661,7 @@ export default function TakeCodingTestMain() {
               </div>
               <div>
                 <span className="text-sm text-gray-500">Total Points</span>
-                <p className="font-semibold">{questions.reduce((sum, q) => sum + q.points, 0)} points</p>
+                <p className="font-semibold">{questions.reduce((sum: number, q: CodingQuestion) => sum + q.points, 0)} points</p>
               </div>
             </div>
             
@@ -692,8 +715,8 @@ export default function TakeCodingTestMain() {
   const currentAnswer = userAnswers.find(ua => ua.question_id === currentQ?.id)
 
   // Calculate current total score for display
-  const currentTotalScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
-  const maxPossibleScore = questions.reduce((sum, q) => sum + q.points, 0)
+  const currentTotalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => sum + (answer.points_earned || 0), 0)
+  const maxPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + q.points, 0)
 
   return (
     <div className="min-h-screen bg-gray-100">
