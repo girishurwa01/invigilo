@@ -281,127 +281,112 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
     }
   }, [user, testData, questions.length, userAnswers, currentAttemptId])
 
-  const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
-    if (submissionInProgress.current || testSubmitted || !user || !testData) {
-      console.log('Submission blocked:', { submissionInProgress: submissionInProgress.current, testSubmitted, user: !!user, testData: !!testData })
-      return
-    }
+ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
+  if (submissionInProgress.current || testSubmitted || !user || !testData) {
+    console.log('Submission blocked:', { submissionInProgress: submissionInProgress.current, testSubmitted, user: !!user, testData: !!testData })
+    return
+  }
 
-    console.log('Submitting coding test due to:', reason)
-    submissionInProgress.current = true
-    setSubmitting(true)
-    setTestSubmitted(true)
+  console.log('Submitting coding test due to:', reason)
+  submissionInProgress.current = true
+  setSubmitting(true)
+  setTestSubmitted(true)
 
-    try {
-      let attemptId = currentAttemptId
+  try {
+    let attemptId = currentAttemptId
 
-      // Calculate total score from individual question scores
-      const totalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => {
-        return sum + (answer.points_earned || 0)
-      }, 0)
+    // Calculate total score from individual question scores
+    const totalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => {
+      return sum + (answer.points_earned || 0)
+    }, 0)
 
-      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
-      
-      console.log('Final submission - Total score:', totalScore)
-      console.log('Time taken:', timeTaken, 'minutes')
-      console.log('User answers breakdown:', userAnswers.map(ua => ({
-        question_id: ua.question_id,
-        points_earned: ua.points_earned,
-        compilation_status: ua.compilation_status
-      })))
+    const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
+    
+    console.log('Final submission - Total score:', totalScore)
+    console.log('Time taken:', timeTaken, 'minutes')
 
-      // Ensure we have an attempt record
+    // Ensure we have an attempt record
+    if (!attemptId) {
+      attemptId = await createOrUpdateAttempt()
       if (!attemptId) {
-        attemptId = await createOrUpdateAttempt()
-        if (!attemptId) {
-          throw new Error('Failed to create test attempt')
-        }
+        throw new Error('Failed to create test attempt')
       }
-
-      // Update test attempt with completion details - CRITICAL FIX
-      const { error: updateError } = await supabase
-        .from('test_attempts')
-        .update({ 
-          score: totalScore,
-          time_taken: timeTaken,
-          completed_at: new Date().toISOString(), // MARK AS COMPLETED
-          answers: userAnswers
-        })
-        .eq('id', attemptId)
-
-      if (updateError) {
-        console.error('Error updating test attempt:', updateError)
-        throw new Error('Failed to save test completion: ' + updateError.message)
-      }
-
-      console.log('Successfully marked test as completed with score:', totalScore)
-
-      // Save final answers to user_coding_answers table for each question
-      for (const answer of userAnswers) {
-        const question = questions.find(q => q.id === answer.question_id)
-        if (!question) continue
-
-        const answerData = {
-          attempt_id: attemptId,
-          question_id: answer.question_id,
-          code_submission: answer.code_submission || '',
-          compilation_status: answer.compilation_status || 'Not Submitted',
-          execution_time: answer.execution_time || null,
-          memory_used: answer.memory_used || null,
-          points_earned: answer.points_earned || 0,
-          ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null
-        }
-
-        // Use upsert to handle duplicates
-        const { error } = await supabase
-          .from('user_coding_answers')
-          .upsert(answerData, {
-            onConflict: 'attempt_id,question_id'
-          })
-        
-        if (error) {
-          console.error('Error saving coding answer:', error)
-        } else {
-          console.log('Saved answer for question:', answer.question_id, 'with points:', answer.points_earned)
-        }
-      }
-
-      // Verify the final score was saved correctly
-      const { data: verifyAttempt, error: verifyError } = await supabase
-        .from('test_attempts')
-        .select('score, completed_at, time_taken')
-        .eq('id', attemptId)
-        .single()
-
-      if (verifyError) {
-        console.error('Error verifying final submission:', verifyError)
-      } else {
-        console.log('Final verification - Score:', verifyAttempt.score, 'Completed:', verifyAttempt.completed_at, 'Time taken:', verifyAttempt.time_taken)
-      }
-
-      const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
-      
-      alert(
-        reason === 'timeUp'
-          ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
-          : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
-      )
-
-      // Wait a moment before redirecting to ensure all database operations complete
-      setTimeout(() => {
-        router.push('/view-marks')
-      }, 2000) // Increased timeout
-
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      console.error('Error submitting coding test:', error)
-      alert(`Error submitting test: ${errorMessage}`)
-      submissionInProgress.current = false
-      setSubmitting(false)
-      setTestSubmitted(false)
     }
-  }, [testSubmitted, user, testData, userAnswers, questions, timeLeft, router, currentAttemptId, createOrUpdateAttempt])
 
+    // CRITICAL FIX: Do all database operations in the correct order
+    // First, save all individual answers
+    for (const answer of userAnswers) {
+      const question = questions.find(q => q.id === answer.question_id)
+      if (!question) continue
+
+      const answerData = {
+        attempt_id: attemptId,
+        question_id: answer.question_id,
+        code_submission: answer.code_submission || '',
+        compilation_status: answer.compilation_status || 'Not Submitted',
+        execution_time: answer.execution_time || null,
+        memory_used: answer.memory_used || null,
+        points_earned: answer.points_earned || 0,
+        ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null
+      }
+
+      const { error } = await supabase
+        .from('user_coding_answers')
+        .upsert(answerData, {
+          onConflict: 'attempt_id,question_id'
+        })
+      
+      if (error) {
+        console.error('Error saving coding answer:', error)
+        throw new Error(`Failed to save answer for question ${answer.question_id}: ${error.message}`)
+      } else {
+        console.log('Saved answer for question:', answer.question_id, 'with points:', answer.points_earned)
+      }
+    }
+
+    // THEN, update the attempt as completed with final score - SINGLE ATOMIC OPERATION
+    const { data: finalAttempt, error: updateError } = await supabase
+      .from('test_attempts')
+      .update({ 
+        score: totalScore,
+        time_taken: timeTaken,
+        completed_at: new Date().toISOString(),
+        answers: userAnswers
+      })
+      .eq('id', attemptId)
+      .select('score, completed_at, time_taken')
+      .single()
+
+    if (updateError) {
+      console.error('Error updating test attempt:', updateError)
+      throw new Error('Failed to save test completion: ' + updateError.message)
+    }
+
+    console.log('Successfully marked test as completed with score:', finalAttempt.score)
+    console.log('Final verification from update response:', finalAttempt)
+
+    const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
+    
+    alert(
+      reason === 'timeUp'
+        ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
+        : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
+    )
+
+    // Wait a moment before redirecting to ensure all database operations complete
+    setTimeout(() => {
+      router.push('/view-marks')
+    }, 2000)
+
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    console.error('Error submitting coding test:', error)
+    alert(`Error submitting test: ${errorMessage}`)
+    submissionInProgress.current = false
+    setSubmitting(false)
+    setTestSubmitted(false)
+  }
+}, [testSubmitted, user, testData, userAnswers, questions, timeLeft, router, currentAttemptId, createOrUpdateAttempt])
   useEffect(() => {
     const getSession = async () => {
       try {
@@ -582,16 +567,17 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
     }
   }
 
-  const saveProgress = useCallback(async () => {
-    if (!user || !testData || testSubmitted) return
 
-    try {
-      await createOrUpdateAttempt()
-      console.log('Progress auto-saved')
-    } catch (error) {
-      console.error('Error saving progress:', error)
-    }
-  }, [user, testData, testSubmitted, createOrUpdateAttempt])
+const saveProgress = useCallback(async () => {
+  if (!user || !testData || testSubmitted || submissionInProgress.current) return // Added submissionInProgress check
+
+  try {
+    await createOrUpdateAttempt()
+    console.log('Progress auto-saved')
+  } catch (error) {
+    console.error('Error saving progress:', error)
+  }
+}, [user, testData, testSubmitted, createOrUpdateAttempt])
 
   // Auto-save progress every 30 seconds
   useEffect(() => {
