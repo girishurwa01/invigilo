@@ -7,6 +7,15 @@ const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY!
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!
 
 /**
+ * Defines the structure of a question object for type safety.
+ */
+interface Question {
+  id: string;
+  problem_statement: string;
+  points: number;
+}
+
+/**
  * A new function to validate that the submitted code isn't empty or just comments.
  * This is the first line of defense against meaningless submissions.
  * @param code The user's submitted code.
@@ -55,7 +64,7 @@ async function runOnJudge0(language_id: number, source_code: string) {
     }
 }
 
-async function evaluateWithAI(userCode: string, languageId: number, question: any, compilationStatus: string) {
+async function evaluateWithAI(userCode: string, languageId: number, question: Question, compilationStatus: string) {
     console.log('Starting AI evaluation...')
     if (!GEMINI_API_KEY) {
         throw new Error('GEMINI_API_KEY environment variable is missing')
@@ -112,7 +121,7 @@ async function evaluateWithAI(userCode: string, languageId: number, question: an
         
         console.log('Gemini raw response:', responseText)
         
-        let cleanedResponse = responseText.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '')
+        const cleanedResponse = responseText.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '')
         
         const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/)
         if (!jsonMatch) {
@@ -225,11 +234,12 @@ export async function POST(request: Request) {
         console.log('=== GRADING REQUEST END ===')
         return NextResponse.json(response)
 
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("Critical grading error:", error)
+        const errorMessage = error instanceof Error ? error.message : 'Internal server error';
         return NextResponse.json({
             success: false,
-            error: error.message || 'Internal server error'
+            error: errorMessage
         }, { status: 500 })
     }
 }
