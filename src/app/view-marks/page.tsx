@@ -79,36 +79,6 @@ interface LeaderboardEntry {
   isCurrentUser: boolean
 }
 
-// Note: The Raw... interfaces are not strictly necessary with the integrated logic
-// but are kept for potential reference or future use.
-interface RawTestAttempt {
-  id: string
-  test_id: string
-  user_id: string
-  score: number
-  total_questions: number
-  time_taken: number | null
-  completed_at: string | null
-  started_at: string
-}
-
-interface RawTestData {
-  id: string
-  title: string
-  test_code: string
-  show_results: boolean
-  created_by: string
-  time_limit: number
-  total_questions: number
-  test_type: string
-}
-
-interface RawProfileData {
-  id: string
-  full_name: string | null
-  email: string
-}
-
 export default function ViewMarksPage() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
@@ -123,36 +93,6 @@ export default function ViewMarksPage() {
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
   const router = useRouter()
 
-  // Add this function to calculate the actual earned score including coding questions
-  const calculateActualScore = async (attemptId: string) => {
-    try {
-      // Get MCQ score from user_answers
-      const { data: mcqAnswers, error: mcqError } = await supabase
-        .from('user_answers')
-        .select('points_earned')
-        .eq('attempt_id', attemptId)
-
-      if (mcqError) throw mcqError
-
-      // Get coding score from user_coding_answers
-      const { data: codingAnswers, error: codingError } = await supabase
-        .from('user_coding_answers')
-        .select('points_earned')
-        .eq('attempt_id', attemptId)
-
-      if (codingError) throw codingError
-
-      const mcqScore = mcqAnswers?.reduce((sum, answer) => sum + (answer.points_earned || 0), 0) || 0
-      const codingScore = codingAnswers?.reduce((sum, answer) => sum + (answer.points_earned || 0), 0) || 0
-
-      return mcqScore + codingScore
-    } catch (error) {
-      console.error('Error calculating actual score:', error)
-      return 0
-    }
-  }
-
-  // Updated loadAllData function with correct score calculation
   const loadAllData = useCallback(async (userId: string) => {
     try {
       setError(null)
@@ -305,7 +245,6 @@ export default function ViewMarksPage() {
     }
   }, [])
 
-  // Updated loadStudentAttempts function with correct score calculation
   const loadStudentAttempts = useCallback(async (userId: string) => {
     try {
       setError(null)
@@ -446,7 +385,6 @@ export default function ViewMarksPage() {
     }
   }, [])
 
-  // Updated loadTestLeaderboard function with correct score calculation
   const loadTestLeaderboard = useCallback(async (testId: string) => {
     try {
       // Step 1: Get completed attempts for the test
@@ -657,7 +595,7 @@ export default function ViewMarksPage() {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       subscription.unsubscribe()
     }
-  }, [router, user?.id, loadAllData, loadStudentAttempts])
+  }, [router, user, loadAllData, loadStudentAttempts])
 
   const deleteTest = async (testId: string) => {
     if (!confirm('Are you sure you want to delete this test? This action cannot be undone.')) {
@@ -748,12 +686,6 @@ export default function ViewMarksPage() {
       }
       return 0
     })
-  }
-
-  const getLeaderboard = (atts: Attempt[]) => {
-    const completed = atts.filter((a) => a.completed_at !== null)
-    const sorted = [...completed].sort((a, b) => b.score - a.score)
-    return sorted.slice(0, 3)
   }
 
   const downloadResults = (testAttempts: Attempt[], testTitle: string) => {
