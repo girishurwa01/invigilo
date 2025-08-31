@@ -7,16 +7,6 @@ const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY!
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY!
 
 /**
- * Defines the expected structure of the question object passed to the API.
- */
-interface QuestionPayload {
-  id: string;
-  problem_statement: string;
-  points: number;
-}
-
-
-/**
  * Pre-check 1: A new function to validate that the submitted code isn't empty or just comments.
  * This is the first line of defense against meaningless submissions.
  * @param code The user's submitted code.
@@ -65,7 +55,7 @@ async function runOnJudge0(language_id: number, source_code: string) {
     }
 }
 
-async function evaluateWithAI(userCode: string, languageId: number, question: QuestionPayload, compilationStatus: string) {
+async function evaluateWithAI(userCode: string, languageId: number, question: any, compilationStatus: string) {
     console.log('Starting AI evaluation...')
     if (!GEMINI_API_KEY) {
         throw new Error('GEMINI_API_KEY environment variable is missing')
@@ -89,9 +79,9 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
         // Pre-check 2: The AI prompt is now much stricter.
         // It's explicitly told to fail submissions that don't make a real attempt.
         const prompt = `
-          You are a strict code evaluator for a programming test. Your primary goal is to grade a user's code submission based on multiple criteria.
+         Your primary goal is to grade a user's code submission based on multiple criteria.
 
-          **CRITICAL RULE:** If the user's code is empty, contains only comments, is the default template code, or makes NO logical attempt to solve the problem (e.g., just "print('hello')"), you MUST assign a 'total_score' of 0. You must also explain in the 'feedback' field that the submission was not a valid attempt.
+         If the user's code is empty, contains only comments, is the default template code, or makes NO logical attempt to solve the problem BASED ON THE QUESTION, you MUST assign a 'total_score' of 0. You must also explain in the 'feedback' field that the submission was not a valid attempt.
 
           Evaluate this ${languageName} code solution:
 
@@ -123,7 +113,7 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
         
         console.log('Gemini raw response:', responseText)
         
-        const cleanedResponse = responseText.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '')
+        let cleanedResponse = responseText.trim().replace(/```json\n?/g, '').replace(/```\n?/g, '')
         
         const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/)
         if (!jsonMatch) {
@@ -140,18 +130,8 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
         // Pre-check 3: Post-evaluation logic to enforce score dependency.
         // If the code isn't correct, it can't be high quality or efficient.
         let { 
-            total_score,
-            quality_score,
-            efficiency_score,
-            understanding_score,
-            feedback
-        } = parsed;
-
-        const {
-            correctness_score,
-            syntax_score,
-            suggestions
-        } = parsed;
+            total_score, correctness_score, quality_score, efficiency_score, syntax_score, understanding_score, feedback, suggestions 
+        } = parsed
 
         if (correctness_score < (question.points * 0.4 * 0.1)) { // If correctness is less than 10% of its possible score
             console.log("Correctness score is near zero. Overriding secondary scores to prevent gaming the system.")
@@ -266,17 +246,11 @@ export async function POST(request: Request) {
         console.log('=== GRADING REQUEST END ===')
         return NextResponse.json(response)
 
-    } catch (error: unknown) {
+    } catch (error: any) {
         console.error("Critical grading error:", error)
-        const errorMessage = error instanceof Error ? error.message : 'Internal server error'
         return NextResponse.json({
             success: false,
-            error: errorMessage,
-            debug: {
-                hasGeminiKey: !!GEMINI_API_KEY,
-                hasJudge0Key: !!JUDGE0_API_KEY,
-                geminiKeyLength: GEMINI_API_KEY?.length || 0
-            }
+            error: error.message || 'Internal server error'
         }, { status: 500 })
     }
 }
