@@ -146,13 +146,15 @@ export default function TakeCodingTestMain() {
         return
       }
 
-      // Check for existing in-progress attempt (or completed without proper cleanup)
-      const { data: existingAttempt } = await supabase
-        .from('test_attempts')
-        .select('id, answers, started_at, completed_at')
-        .eq('test_id', test.id)
-        .eq('user_id', userId)
-        .single()
+const { data: existingAttempts } = await supabase
+  .from('test_attempts')
+  .select('id, answers, started_at, completed_at')
+  .eq('test_id', test.id)
+  .eq('user_id', userId)
+  .order('started_at', { ascending: false })
+  .limit(1)
+
+const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existingAttempts[0] : null
 
       // Get questions from coding_questions table
       const { data: questionsData, error: questionsError } = await supabase
