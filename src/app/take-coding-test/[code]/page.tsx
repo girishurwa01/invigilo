@@ -281,7 +281,7 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
     }
   }, [user, testData, questions.length, userAnswers, currentAttemptId])
 
- const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
+const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
   if (submissionInProgress.current || testSubmitted || !user || !testData) {
     console.log('Submission blocked:', { submissionInProgress: submissionInProgress.current, testSubmitted, user: !!user, testData: !!testData })
     return
@@ -305,7 +305,7 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
     console.log('Final submission - Total score:', totalScore)
     console.log('Time taken:', timeTaken, 'minutes')
 
-    // Ensure we have an attempt record
+    // Ensure we have an attempt record first
     if (!attemptId) {
       attemptId = await createOrUpdateAttempt()
       if (!attemptId) {
@@ -313,8 +313,23 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
       }
     }
 
-    // CRITICAL FIX: Do all database operations in the correct order
-    // First, save all individual answers
+    // Verify the attempt exists before updating
+    const { data: existingAttempt, error: verifyError } = await supabase
+      .from('test_attempts')
+      .select('id, completed_at')
+      .eq('id', attemptId)
+      .single()
+
+    if (verifyError || !existingAttempt) {
+      console.error('Attempt verification failed:', verifyError)
+      throw new Error('Test attempt not found. Please refresh and try again.')
+    }
+
+    if (existingAttempt.completed_at) {
+      throw new Error('This test has already been submitted.')
+    }
+
+    // Save all individual answers first
     for (const answer of userAnswers) {
       const question = questions.find(q => q.id === answer.question_id)
       if (!question) continue
@@ -344,8 +359,8 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
       }
     }
 
-    // THEN, update the attempt as completed with final score - SINGLE ATOMIC OPERATION
-    const { data: finalAttempt, error: updateError } = await supabase
+    // Update the attempt as completed with final score - REMOVED .single() and simplified
+    const { data: updateResult, error: updateError } = await supabase
       .from('test_attempts')
       .update({ 
         score: totalScore,
@@ -355,13 +370,18 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
       })
       .eq('id', attemptId)
       .select('score, completed_at, time_taken')
-      .single()
 
     if (updateError) {
       console.error('Error updating test attempt:', updateError)
       throw new Error('Failed to save test completion: ' + updateError.message)
     }
 
+    // Check if update was successful
+    if (!updateResult || updateResult.length === 0) {
+      throw new Error('Test attempt update failed - no records affected')
+    }
+
+    const finalAttempt = updateResult[0] // Get first (and should be only) result
     console.log('Successfully marked test as completed with score:', finalAttempt.score)
     console.log('Final verification from update response:', finalAttempt)
 
