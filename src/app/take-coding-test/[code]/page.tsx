@@ -1,5 +1,4 @@
 'use client'
-
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import { User } from '@supabase/supabase-js'
@@ -40,7 +39,6 @@ interface AIFeedback {
       [key: string]: FeedbackCriterion;
   };
 }
-
 
 interface UserCodingAnswer {
   question_id: string
@@ -106,6 +104,7 @@ export default function TakeCodingTestMain() {
   const [testSubmitted, setTestSubmitted] = useState(false)
   const [runningCode, setRunningCode] = useState(false)
   const [testResults, setTestResults] = useState<TestResult | null>(null)
+  const [currentAttemptId, setCurrentAttemptId] = useState<string | null>(null)
   const submissionInProgress = useRef(false)
   const router = useRouter()
 
@@ -126,12 +125,13 @@ export default function TakeCodingTestMain() {
         throw new Error('Coding test not found or inactive')
       }
 
-      // Check for existing attempts
+      // Check for existing completed attempts
       const { data: attempts, error: attemptError } = await supabase
         .from('test_attempts')
         .select('id, completed_at, score')
         .eq('test_id', test.id)
         .eq('user_id', userId)
+        .not('completed_at', 'is', null)
         .order('completed_at', { ascending: false })
 
       if (attemptError && attemptError.code !== 'PGRST116') {
@@ -139,15 +139,21 @@ export default function TakeCodingTestMain() {
       }
 
       if (attempts && attempts.length > 0) {
-        const completedAttempt = attempts.find(attempt => attempt.completed_at !== null)
-        if (completedAttempt) {
-          setError('You have already completed this coding test. Redirecting to view your marks.')
-          setTimeout(() => {
-            router.push('/view-marks')
-          }, 2000)
-          return
-        }
+        setError('You have already completed this coding test. Redirecting to view your marks.')
+        setTimeout(() => {
+          router.push('/view-marks')
+        }, 2000)
+        return
       }
+
+      // Check for existing in-progress attempt
+      const { data: inProgressAttempt } = await supabase
+        .from('test_attempts')
+        .select('id, answers, started_at')
+        .eq('test_id', test.id)
+        .eq('user_id', userId)
+        .is('completed_at', null)
+        .single()
 
       // Get questions from coding_questions table
       const { data: questionsData, error: questionsError } = await supabase
@@ -168,15 +174,31 @@ export default function TakeCodingTestMain() {
       setTestData(test)
       setQuestions(questionsData)
       
-      // Initialize user answers with default code templates
-      setUserAnswers(questionsData.map(q => ({
-        question_id: q.id,
-        code_submission: DEFAULT_CODE_TEMPLATES[q.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || '',
-        compilation_status: 'Not Submitted',
-        points_earned: 0
-      })))
+      // Initialize user answers
+      if (inProgressAttempt && inProgressAttempt.answers) {
+        // Resume from saved progress
+        setUserAnswers(inProgressAttempt.answers as UserCodingAnswer[])
+        setCurrentAttemptId(inProgressAttempt.id)
+        
+        // Calculate remaining time
+        const startedAt = new Date(inProgressAttempt.started_at).getTime()
+        const elapsed = (Date.now() - startedAt) / 1000
+        const remaining = Math.max(0, test.time_limit * 60 - elapsed)
+        setTimeLeft(Math.floor(remaining))
+        
+        console.log('Resumed test with remaining time:', Math.floor(remaining))
+      } else {
+        // Start fresh
+        const initialAnswers = questionsData.map(q => ({
+          question_id: q.id,
+          code_submission: DEFAULT_CODE_TEMPLATES[q.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || '',
+          compilation_status: 'Not Submitted',
+          points_earned: 0
+        }))
+        setUserAnswers(initialAnswers)
+        setTimeLeft(test.time_limit * 60)
+      }
       
-      setTimeLeft(test.time_limit * 60)
       setLoading(false)
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
@@ -185,6 +207,44 @@ export default function TakeCodingTestMain() {
       setLoading(false)
     }
   }, [code, router])
+
+  const createOrUpdateAttempt = useCallback(async () => {
+    if (!user || !testData) return null
+
+    try {
+      if (currentAttemptId) {
+        // Update existing attempt
+        const { error } = await supabase
+          .from('test_attempts')
+          .update({ answers: userAnswers })
+          .eq('id', currentAttemptId)
+        
+        if (error) throw error
+        return currentAttemptId
+      } else {
+        // Create new attempt
+        const { data: attempt, error } = await supabase
+          .from('test_attempts')
+          .insert({
+            test_id: testData.id,
+            user_id: user.id,
+            score: 0, // Will be calculated from individual question scores
+            total_questions: questions.length,
+            time_taken: 0, // Will be updated on submission
+            answers: userAnswers
+          })
+          .select()
+          .single()
+
+        if (error) throw error
+        setCurrentAttemptId(attempt.id)
+        return attempt.id
+      }
+    } catch (error) {
+      console.error('Error creating/updating attempt:', error)
+      return null
+    }
+  }, [user, testData, questions.length, userAnswers, currentAttemptId])
 
   const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
     if (submissionInProgress.current || testSubmitted || !user || !testData) {
@@ -197,117 +257,102 @@ export default function TakeCodingTestMain() {
     setTestSubmitted(true)
 
     try {
-      // Create test attempt first
-      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
-      
-      const { data: attempt, error: attemptError } = await supabase
-        .from('test_attempts')
-        .insert({
-          test_id: testData.id,
-          user_id: user.id,
-          score: 0, // Will update after grading
-          total_questions: questions.length,
-          time_taken: timeTaken,
-          completed_at: new Date().toISOString(),
-          answers: userAnswers // Store as backup
-        })
-        .select()
-        .single()
+      let attemptId = currentAttemptId
 
-      if (attemptError) {
-        if (attemptError.code === '23505') {
-          alert('Test has already been submitted. Redirecting to view marks.')
-          router.push('/view-marks')
-          return
+      // Ensure we have an attempt record
+      if (!attemptId) {
+        attemptId = await createOrUpdateAttempt()
+        if (!attemptId) {
+          throw new Error('Failed to create test attempt')
         }
-        throw new Error(attemptError.message)
       }
 
-      // Grade each question and save to user_coding_answers
-      let totalScore = 0
-      const gradingPromises = userAnswers.map(async (ua, index) => {
-        const question = questions[index]
-        if (!ua.code_submission || !question) {
-          // Save empty submission
-          await supabase.from('user_coding_answers').insert({
-            attempt_id: attempt.id,
-            question_id: ua.question_id,
-            code_submission: ua.code_submission || '',
-            compilation_status: 'Not Submitted',
-            points_earned: 0,
-            ai_feedback: 'No code submitted'
-          })
-          return 0
-        }
+      // Calculate total score from individual question scores
+      const totalScore = userAnswers.reduce((sum, answer) => {
+        return sum + (answer.points_earned || 0)
+      }, 0)
 
-        try {
-          const response = await fetch('/api/grade-code', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              userCode: ua.code_submission,
-              languageId: question.language_id,
-              question: question
-            })
-          })
+      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
+      
+      console.log('Calculated total score from user answers:', totalScore)
+      console.log('User answers breakdown:', userAnswers.map(ua => ({
+        question_id: ua.question_id,
+        points_earned: ua.points_earned
+      })))
 
-          let gradingResult = {
-            compilationStatus: 'Error',
-            totalScore: 0,
-            executionTime: 0,
-            memoryUsed: 0,
-            aiFeedback: 'Grading failed'
-          }
-
-          if (response.ok) {
-            gradingResult = await response.json()
-          } else {
-            console.error('Grading API error for question:', question.id)
-          }
-
-          const pointsEarned = gradingResult.totalScore || 0
-          totalScore += pointsEarned
-
-          // Save detailed answer to user_coding_answers
-          await supabase.from('user_coding_answers').insert({
-            attempt_id: attempt.id,
-            question_id: ua.question_id,
-            code_submission: ua.code_submission,
-            compilation_status: gradingResult.compilationStatus,
-            execution_time: gradingResult.executionTime,
-            memory_used: gradingResult.memoryUsed,
-            points_earned: pointsEarned,
-            ai_feedback: JSON.stringify(gradingResult.aiFeedback)
-          })
-
-          return pointsEarned
-        } catch (error) {
-          console.error('Error grading question:', question.id, error)
-          
-          // Save error submission
-          await supabase.from('user_coding_answers').insert({
-            attempt_id: attempt.id,
-            question_id: ua.question_id,
-            code_submission: ua.code_submission,
-            compilation_status: 'Error',
-            points_earned: 0,
-            ai_feedback: 'Error occurred during grading'
-          })
-          
-          return 0
-        }
-      })
-
-      await Promise.all(gradingPromises)
-
-      // Update test attempt with final score
+      // Update test attempt with completion details
       const { error: updateError } = await supabase
         .from('test_attempts')
-        .update({ score: totalScore })
-        .eq('id', attempt.id)
+        .update({ 
+          score: totalScore,
+          time_taken: timeTaken,
+          completed_at: new Date().toISOString(),
+          answers: userAnswers
+        })
+        .eq('id', attemptId)
 
       if (updateError) {
-        console.error('Error updating final score:', updateError)
+        console.error('Error updating test attempt:', updateError)
+        throw new Error('Failed to save test completion')
+      }
+
+      // Save final answers to user_coding_answers table for each question
+      for (const answer of userAnswers) {
+        const question = questions.find(q => q.id === answer.question_id)
+        if (!question) continue
+
+        // Check if answer already exists for this attempt and question
+        const { data: existingAnswer } = await supabase
+          .from('user_coding_answers')
+          .select('id')
+          .eq('attempt_id', attemptId)
+          .eq('question_id', answer.question_id)
+          .single()
+
+        const answerData = {
+          attempt_id: attemptId,
+          question_id: answer.question_id,
+          code_submission: answer.code_submission || '',
+          compilation_status: answer.compilation_status || 'Not Submitted',
+          execution_time: answer.execution_time || null,
+          memory_used: answer.memory_used || null,
+          points_earned: answer.points_earned || 0,
+          ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null
+        }
+
+        if (existingAnswer) {
+          // Update existing answer
+          const { error } = await supabase
+            .from('user_coding_answers')
+            .update(answerData)
+            .eq('id', existingAnswer.id)
+          
+          if (error) {
+            console.error('Error updating coding answer:', error)
+          }
+        } else {
+          // Insert new answer
+          const { error } = await supabase
+            .from('user_coding_answers')
+            .insert(answerData)
+          
+          if (error) {
+            console.error('Error inserting coding answer:', error)
+          }
+        }
+      }
+
+      // Verify the final score was saved correctly
+      const { data: verifyAttempt, error: verifyError } = await supabase
+        .from('test_attempts')
+        .select('score')
+        .eq('id', attemptId)
+        .single()
+
+      if (verifyError) {
+        console.error('Error verifying score:', verifyError)
+      } else {
+        console.log('Final verified score:', verifyAttempt.score)
       }
 
       const totalPossibleScore = questions.reduce((sum, q) => sum + (q.points || 5), 0)
@@ -318,7 +363,11 @@ export default function TakeCodingTestMain() {
           : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
       )
 
-      router.push('/view-marks')
+      // Wait a moment before redirecting to ensure all database operations complete
+      setTimeout(() => {
+        router.push('/view-marks')
+      }, 1000)
+
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error'
       console.error('Error submitting coding test:', error)
@@ -327,7 +376,7 @@ export default function TakeCodingTestMain() {
       setSubmitting(false)
       setTestSubmitted(false)
     }
-  }, [testSubmitted, user, testData, userAnswers, questions, timeLeft, router])
+  }, [testSubmitted, user, testData, userAnswers, questions, timeLeft, router, currentAttemptId, createOrUpdateAttempt])
 
   useEffect(() => {
     const getSession = async () => {
@@ -415,6 +464,11 @@ export default function TakeCodingTestMain() {
     setTestResults(null)
 
     try {
+      // Ensure we have an attempt record first
+      if (!currentAttemptId) {
+        await createOrUpdateAttempt()
+      }
+
       const response = await fetch('/api/grade-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -429,7 +483,9 @@ export default function TakeCodingTestMain() {
         const result = await response.json()
         setTestResults(result)
         
-        // Update user answer with test results
+        const pointsEarned = Math.max(0, Math.min(currentQ.points, result.totalScore || 0))
+        
+        // Update user answer with test results - THIS IS THE KEY PART
         setUserAnswers(prev =>
           prev.map(ua =>
             ua.question_id === currentQ.id ? {
@@ -437,11 +493,58 @@ export default function TakeCodingTestMain() {
               compilation_status: result.compilationStatus,
               execution_time: result.executionTime,
               memory_used: result.memoryUsed,
-              points_earned: result.totalScore,
+              points_earned: pointsEarned, // Update the points earned for this question
               ai_feedback: result.aiFeedback
             } : ua
           )
         )
+
+        // Save or update this question's answer in the database immediately
+        if (currentAttemptId) {
+          const answerData = {
+            attempt_id: currentAttemptId,
+            question_id: currentQ.id,
+            code_submission: currentAnswer.code_submission,
+            compilation_status: result.compilationStatus,
+            execution_time: result.executionTime || null,
+            memory_used: result.memoryUsed || null,
+            points_earned: pointsEarned,
+            ai_feedback: JSON.stringify(result.aiFeedback)
+          }
+
+          // Check if answer already exists
+          const { data: existingAnswer } = await supabase
+            .from('user_coding_answers')
+            .select('id')
+            .eq('attempt_id', currentAttemptId)
+            .eq('question_id', currentQ.id)
+            .single()
+
+          if (existingAnswer) {
+            // Update existing answer
+            const { error } = await supabase
+              .from('user_coding_answers')
+              .update(answerData)
+              .eq('id', existingAnswer.id)
+            
+            if (error) {
+              console.error('Error updating individual answer:', error)
+            } else {
+              console.log('Updated answer for question:', currentQ.id, 'with points:', pointsEarned)
+            }
+          } else {
+            // Insert new answer
+            const { error } = await supabase
+              .from('user_coding_answers')
+              .insert(answerData)
+            
+            if (error) {
+              console.error('Error saving individual answer:', error)
+            } else {
+              console.log('Saved new answer for question:', currentQ.id, 'with points:', pointsEarned)
+            }
+          }
+        }
       } else {
         const error = await response.json()
         alert(`Error running code: ${error.error}`)
@@ -458,30 +561,12 @@ export default function TakeCodingTestMain() {
     if (!user || !testData || testSubmitted) return
 
     try {
-      // Check if attempt exists (in progress, not completed)
-      const { data: existingAttempt } = await supabase
-        .from('test_attempts')
-        .select('id')
-        .eq('test_id', testData.id)
-        .eq('user_id', user.id)
-        .is('completed_at', null)
-        .single()
-
-      if (existingAttempt) {
-        // Update existing attempt answers
-        const { error } = await supabase
-          .from('test_attempts')
-          .update({ answers: userAnswers })
-          .eq('id', existingAttempt.id)
-
-        if (!error) {
-          console.log('Progress saved successfully')
-        }
-      }
+      await createOrUpdateAttempt()
+      console.log('Progress auto-saved')
     } catch (error) {
       console.error('Error saving progress:', error)
     }
-  }, [user, testData, userAnswers, testSubmitted])
+  }, [user, testData, testSubmitted, createOrUpdateAttempt])
 
   // Auto-save progress every 30 seconds
   useEffect(() => {
@@ -491,10 +576,20 @@ export default function TakeCodingTestMain() {
     return () => clearInterval(saveInterval)
   }, [testStarted, testSubmitted, saveProgress])
 
+  // Create attempt when test starts
+  useEffect(() => {
+    if (testStarted && !currentAttemptId && user && testData) {
+      createOrUpdateAttempt()
+    }
+  }, [testStarted, currentAttemptId, user, testData, createOrUpdateAttempt])
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading coding test...</div>
+        <div className="flex flex-col items-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+          <div className="text-xl text-gray-600 mt-4">Loading coding test...</div>
+        </div>
       </div>
     )
   }
@@ -551,7 +646,7 @@ export default function TakeCodingTestMain() {
               <h3 className="font-semibold text-blue-800 mb-3">Coding Test Instructions</h3>
               <ul className="text-sm text-blue-700 space-y-2">
                 <li>• Write code in the provided editor for each question</li>
-                <li>• Test your code using the &apos;Run & Grade&apos; button to see your score</li>
+                <li>• Test your code using the 'Run & Grade' button to see your score</li>
                 <li>• Your code will be evaluated by AI based on multiple criteria</li>
                 <li>• Each question has its own point value and programming language</li>
                 <li>• You can navigate between questions freely</li>
@@ -596,6 +691,10 @@ export default function TakeCodingTestMain() {
   const currentQ = questions[currentQuestion]
   const currentAnswer = userAnswers.find(ua => ua.question_id === currentQ?.id)
 
+  // Calculate current total score for display
+  const currentTotalScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
+  const maxPossibleScore = questions.reduce((sum, q) => sum + q.points, 0)
+
   return (
     <div className="min-h-screen bg-gray-100">
       {/* Header */}
@@ -605,11 +704,17 @@ export default function TakeCodingTestMain() {
             <div>
               <h1 className="text-xl font-bold text-gray-900">{testData.title}</h1>
               <p className="text-sm text-gray-600">
-                Question {currentQuestion + 1} of {questions.length} •
+                Question {currentQuestion + 1} of {questions.length} •{' '}
                 {LANGUAGE_NAMES[currentQ?.language_id as keyof typeof LANGUAGE_NAMES]} • {currentQ?.points} points
               </p>
             </div>
             <div className="flex items-center space-x-6">
+              <div className="text-center">
+                <div className="text-sm text-gray-500">Current Score</div>
+                <div className="text-lg font-bold text-blue-600">
+                  {currentTotalScore}/{maxPossibleScore}
+                </div>
+              </div>
               <div className="text-center">
                 <div className="text-sm text-gray-500">Time Remaining</div>
                 <div className={`text-lg font-bold ${timeLeft < 300 ? 'text-red-600' : 'text-green-600'}`}>
@@ -619,14 +724,14 @@ export default function TakeCodingTestMain() {
               <button
                 onClick={runCode}
                 disabled={runningCode || testSubmitted}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium disabled:opacity-50"
+                className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg font-medium disabled:opacity-50 transition-colors"
               >
                 {runningCode ? 'Evaluating...' : 'Run & Grade'}
               </button>
               <button
                 onClick={() => submitTest('manual')}
                 disabled={submitting || testSubmitted}
-                className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-medium disabled:opacity-50"
+                className="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg font-medium disabled:opacity-50 transition-colors"
               >
                 {submitting ? 'Submitting...' : testSubmitted ? 'Submitted' : 'Submit Test'}
               </button>
@@ -789,7 +894,7 @@ export default function TakeCodingTestMain() {
                 <button
                   onClick={() => setCurrentQuestion(prev => Math.max(0, prev - 1))}
                   disabled={currentQuestion === 0 || testSubmitted}
-                  className="flex items-center px-6 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex items-center px-6 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
@@ -800,10 +905,13 @@ export default function TakeCodingTestMain() {
                   <div className="text-sm text-gray-600">
                     Progress: {userAnswers.filter(ua => ua.compilation_status !== 'Not Submitted').length}/{questions.length} evaluated
                   </div>
+                  <div className="text-sm font-medium text-blue-600">
+                    Total Score: {currentTotalScore}/{maxPossibleScore}
+                  </div>
                   <button
                     onClick={() => setCurrentQuestion(prev => Math.min(questions.length - 1, prev + 1))}
                     disabled={currentQuestion === questions.length - 1 || testSubmitted}
-                    className="flex items-center px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="flex items-center px-6 py-3 bg-green-600 hover:bg-green-700 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
                     Next
                     <svg className="w-4 h-4 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
