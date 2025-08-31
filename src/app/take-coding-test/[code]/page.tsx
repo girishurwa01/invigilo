@@ -359,7 +359,7 @@ export default function TakeCodingTestMain() {
       
       alert(
         reason === 'timeUp'
-          ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
+          ? `Time&apos;s up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
           : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
       )
 
