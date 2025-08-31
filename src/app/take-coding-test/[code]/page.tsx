@@ -229,33 +229,55 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
     }
   }, [code, router])
 
-  const createOrUpdateAttempt = useCallback(async () => {
-    if (!user || !testData) return null
+const createOrUpdateAttempt = useCallback(async () => {
+  if (!user || !testData) return null
 
-    try {
-      if (currentAttemptId) {
-        // Update existing attempt with current answers and calculated score
-        const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
-        
-        const { error } = await supabase
-          .from('test_attempts')
-          .update({ 
-            answers: userAnswers,
-            score: currentScore // Update score in real-time
-          })
-          .eq('id', currentAttemptId)
-        
-        if (error) throw error
-        console.log('Updated attempt with current score:', currentScore)
-        return currentAttemptId
+  try {
+    if (currentAttemptId) {
+      // Update existing attempt with current answers and calculated score
+      const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
+      
+      const { error } = await supabase
+        .from('test_attempts')
+        .update({ 
+          answers: userAnswers,
+          score: currentScore // Update score in real-time
+        })
+        .eq('id', currentAttemptId)
+      
+      if (error) throw error
+      console.log('Updated attempt with current score:', currentScore)
+      return currentAttemptId
+    } else {
+      // Check if attempt already exists for this user and test
+      const { data: existingAttempt, error: findError } = await supabase
+        .from('test_attempts')
+        .select('id, completed_at')
+        .eq('test_id', testData.id)
+        .eq('user_id', user.id)
+        .order('started_at', { ascending: false })
+        .limit(1)
+
+      if (findError && findError.code !== 'PGRST116') {
+        throw findError
+      }
+
+      if (existingAttempt && existingAttempt.length > 0) {
+        // Use existing attempt if not completed
+        if (!existingAttempt[0].completed_at) {
+          setCurrentAttemptId(existingAttempt[0].id)
+          console.log('Using existing uncompleted attempt:', existingAttempt[0].id)
+          return existingAttempt[0].id
+        } else {
+          throw new Error('Test has already been completed')
+        }
       } else {
-        // Create new attempt or handle the unique constraint
+        // Create new attempt
         const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
         
-        // Try to insert, but handle unique constraint violation
-        const { data: attempt, error } = await supabase
+        const { data: attempt, error: createError } = await supabase
           .from('test_attempts')
-          .upsert({
+          .insert({
             test_id: testData.id,
             user_id: user.id,
             score: currentScore,
@@ -263,23 +285,26 @@ const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existi
             time_taken: 0, // Will be updated on submission
             answers: userAnswers,
             started_at: new Date().toISOString(),
-            completed_at: null // Ensure it's not marked as completed yet
-          }, {
-            onConflict: 'test_id,user_id'
+            completed_at: null
           })
-          .select()
+          .select('id')
           .single()
 
-        if (error) throw error
+        if (createError) {
+          console.error('Error creating attempt:', createError)
+          throw new Error(`Failed to create test attempt: ${createError.message}`)
+        }
+
         setCurrentAttemptId(attempt.id)
-        console.log('Created/updated attempt with score:', currentScore)
+        console.log('Created new attempt with score:', currentScore)
         return attempt.id
       }
-    } catch (error) {
-      console.error('Error creating/updating attempt:', error)
-      return null
     }
-  }, [user, testData, questions.length, userAnswers, currentAttemptId])
+  } catch (error) {
+    console.error('Error creating/updating attempt:', error)
+    return null
+  }
+}, [user, testData, questions.length, userAnswers, currentAttemptId])
 
 const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
   if (submissionInProgress.current || testSubmitted || !user || !testData) {
@@ -305,27 +330,70 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
     console.log('Final submission - Total score:', totalScore)
     console.log('Time taken:', timeTaken, 'minutes')
 
-    // Ensure we have an attempt record first
+    // Handle attempt creation/update more robustly
     if (!attemptId) {
-      attemptId = await createOrUpdateAttempt()
-      if (!attemptId) {
-        throw new Error('Failed to create test attempt')
+      // Try to find existing uncompleted attempt first
+      const { data: existingAttempts, error: findError } = await supabase
+        .from('test_attempts')
+        .select('id, completed_at')
+        .eq('test_id', testData.id)
+        .eq('user_id', user.id)
+        .is('completed_at', null)
+        .order('started_at', { ascending: false })
+        .limit(1)
+
+      if (findError) {
+        console.error('Error finding existing attempt:', findError)
+      }
+
+      if (existingAttempts && existingAttempts.length > 0) {
+        attemptId = existingAttempts[0].id
+        setCurrentAttemptId(attemptId)
+        console.log('Found existing uncompleted attempt:', attemptId)
+      } else {
+        // Create new attempt
+        const { data: newAttempt, error: createError } = await supabase
+          .from('test_attempts')
+          .insert({
+            test_id: testData.id,
+            user_id: user.id,
+            score: 0,
+            total_questions: questions.length,
+            time_taken: 0,
+            answers: userAnswers,
+            started_at: new Date().toISOString(),
+            completed_at: null
+          })
+          .select('id')
+          .single()
+
+        if (createError) {
+          console.error('Error creating attempt:', createError)
+          throw new Error(`Failed to create test attempt: ${createError.message}`)
+        }
+
+        attemptId = newAttempt.id
+        setCurrentAttemptId(attemptId)
+        console.log('Created new attempt:', attemptId)
       }
     }
 
-    // Verify the attempt exists before updating
+    // Verify the attempt exists and is not completed
     const { data: existingAttempt, error: verifyError } = await supabase
       .from('test_attempts')
       .select('id, completed_at')
       .eq('id', attemptId)
-      .single()
 
-    if (verifyError || !existingAttempt) {
+    if (verifyError) {
       console.error('Attempt verification failed:', verifyError)
+      throw new Error('Failed to verify test attempt')
+    }
+
+    if (!existingAttempt || existingAttempt.length === 0) {
       throw new Error('Test attempt not found. Please refresh and try again.')
     }
 
-    if (existingAttempt.completed_at) {
+    if (existingAttempt[0].completed_at) {
       throw new Error('This test has already been submitted.')
     }
 
@@ -359,8 +427,8 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
       }
     }
 
-    // Update the attempt as completed with final score - REMOVED .single() and simplified
-    const { data: updateResult, error: updateError } = await supabase
+    // Update the attempt as completed with final score - FIXED
+    const { error: updateError, count } = await supabase
       .from('test_attempts')
       .update({ 
         score: totalScore,
@@ -369,7 +437,7 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
         answers: userAnswers
       })
       .eq('id', attemptId)
-      .select('score, completed_at, time_taken')
+      .eq('user_id', user.id) // Additional safety check
 
     if (updateError) {
       console.error('Error updating test attempt:', updateError)
@@ -377,13 +445,12 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
     }
 
     // Check if update was successful
-    if (!updateResult || updateResult.length === 0) {
-      throw new Error('Test attempt update failed - no records affected')
+    if (count === 0) {
+      throw new Error('Test attempt update failed - no records affected. Attempt may not exist.')
     }
 
-    const finalAttempt = updateResult[0] // Get first (and should be only) result
-    console.log('Successfully marked test as completed with score:', finalAttempt.score)
-    console.log('Final verification from update response:', finalAttempt)
+    console.log('Successfully marked test as completed with score:', totalScore)
+    console.log('Records updated:', count)
 
     const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
     
