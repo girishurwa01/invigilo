@@ -152,159 +152,166 @@ export default function ViewMarksPage() {
     }
   }
 
-  // Updated loadAllData function with correct score calculation
-  const loadAllData = useCallback(async (userId: string) => {
-    try {
-      setError(null)
-      
-      // Step 1: Load user's tests
-      const { data: testsData, error: testsError } = await supabase
-        .from('tests')
-        .select('*')
-        .eq('created_by', userId)
-        .order('created_at', { ascending: false })
+ // Replace the loadAllData function with this corrected version
+const loadAllData = useCallback(async (userId: string) => {
+  try {
+    setError(null)
+    
+    // Step 1: Load user's tests
+    const { data: testsData, error: testsError } = await supabase
+      .from('tests')
+      .select('*')
+      .eq('created_by', userId)
+      .order('created_at', { ascending: false })
 
-      if (testsError) throw testsError
-      
-      setTests(testsData || [])
+    if (testsError) throw testsError
+    
+    setTests(testsData || [])
 
-      if (!testsData || testsData.length === 0) {
-        setAttempts([])
-        return
-      }
-
-      const userTestIds = testsData.map(test => test.id)
-
-      // Step 2: Get all attempts for user's tests
-      const { data: attemptData, error: attemptError } = await supabase
-        .from('test_attempts')
-        .select('*')
-        .in('test_id', userTestIds)
-        .order('started_at', { ascending: false })
-
-      if (attemptError) throw attemptError
-
-      if (!attemptData || attemptData.length === 0) {
-        setAttempts([])
-        return
-      }
-
-      // Step 3: Get user profiles for attempt makers
-      const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
-      const { data: profilesData, error: profilesError } = await supabase
-        .from('profiles')
-        .select('id, full_name, email')
-        .in('id', userIds)
-
-      if (profilesError) throw profilesError
-
-      // Step 4: Get total points for each test (MCQ questions)
-      const { data: mcqQuestionsData, error: mcqQuestionsError } = await supabase
-        .from('questions')
-        .select('test_id, points')
-        .in('test_id', userTestIds)
-
-      if (mcqQuestionsError) throw mcqQuestionsError
-
-      // Step 5: Get total points for each test (Coding questions)
-      const { data: codingQuestionsData, error: codingQuestionsError } = await supabase
-        .from('coding_questions')
-        .select('test_id, points')
-        .in('test_id', userTestIds)
-
-      if (codingQuestionsError) throw codingQuestionsError
-
-      // Step 6: Get actual scores from user answers (MCQ)
-      const attemptIds = attemptData.map(attempt => attempt.id)
-      const { data: mcqUserAnswers, error: mcqUserAnswersError } = await supabase
-        .from('user_answers')
-        .select('attempt_id, points_earned')
-        .in('attempt_id', attemptIds)
-
-      if (mcqUserAnswersError) throw mcqUserAnswersError
-
-      // Step 7: Get actual scores from coding answers
-      const { data: codingUserAnswers, error: codingUserAnswersError } = await supabase
-        .from('user_coding_answers')
-        .select('attempt_id, points_earned')
-        .in('attempt_id', attemptIds)
-
-      if (codingUserAnswersError) throw codingUserAnswersError
-
-      // Create lookup maps
-      const testsMap = new Map(testsData.map(test => [test.id, test]))
-      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
-      const pointsMap = new Map<string, number>()
-      const actualScoresMap = new Map<string, number>()
-
-      // Calculate total possible points for each test (MCQ + Coding)
-      if (mcqQuestionsData) {
-        mcqQuestionsData.forEach(q => {
-          const currentPoints = pointsMap.get(q.test_id) || 0
-          pointsMap.set(q.test_id, currentPoints + (q.points || 1))
-        })
-      }
-
-      if (codingQuestionsData) {
-        codingQuestionsData.forEach(q => {
-          const currentPoints = pointsMap.get(q.test_id) || 0
-          pointsMap.set(q.test_id, currentPoints + (q.points || 5))
-        })
-      }
-
-      // Calculate actual earned scores for each attempt
-      if (mcqUserAnswers) {
-        mcqUserAnswers.forEach(answer => {
-          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
-          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
-        })
-      }
-
-      if (codingUserAnswers) {
-        codingUserAnswers.forEach(answer => {
-          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
-          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
-        })
-      }
-
-      // Transform attempts data with correct scores
-      const transformedAttempts: Attempt[] = attemptData.map(attempt => {
-        const test = testsMap.get(attempt.test_id)
-        const profile = profilesMap.get(attempt.user_id)
-        const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
-        const actualScore = actualScoresMap.get(attempt.id) ?? attempt.score // Use calculated score, fallback to stored score
-
-        return {
-          id: attempt.id,
-          test_id: attempt.test_id,
-          user_id: attempt.user_id,
-          score: actualScore, // Use calculated score instead of stored score
-          total_questions: attempt.total_questions,
-          total_points: totalPoints,
-          time_taken: attempt.time_taken,
-          completed_at: attempt.completed_at,
-          started_at: attempt.started_at,
-          user: {
-            full_name: profile?.full_name || null,
-            email: profile?.email || 'Unknown'
-          },
-          tests: {
-            title: test?.title || 'Unknown Test',
-            test_code: test?.test_code || 'N/A',
-            time_limit: test?.time_limit || 0,
-            total_questions: test?.total_questions || 0,
-            test_type: test?.test_type || 'mcq'
-          }
-        }
-      })
-
-      setAttempts(transformedAttempts)
-    } catch (error) {
-      console.error('Error loading data:', error)
-      setError('Failed to load data. Please refresh the page.')
+    if (!testsData || testsData.length === 0) {
+      setAttempts([])
+      return
     }
-  }, [])
 
+    const userTestIds = testsData.map(test => test.id)
+
+    // Step 2: Get all attempts for user's tests
+    const { data: attemptData, error: attemptError } = await supabase
+      .from('test_attempts')
+      .select('*')
+      .in('test_id', userTestIds)
+      .order('started_at', { ascending: false })
+
+    if (attemptError) throw attemptError
+
+    if (!attemptData || attemptData.length === 0) {
+      setAttempts([])
+      return
+    }
+
+    // Step 3: Get user profiles for attempt makers
+    const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
+    const { data: profilesData, error: profilesError } = await supabase
+      .from('profiles')
+      .select('id, full_name, email')
+      .in('id', userIds)
+
+    if (profilesError) throw profilesError
+
+    // Step 4: Calculate actual scores for all attempts
+    const attemptIds = attemptData.map(attempt => attempt.id)
+    
+    // Get MCQ scores
+    const { data: mcqUserAnswers, error: mcqUserAnswersError } = await supabase
+      .from('user_answers')
+      .select('attempt_id, points_earned')
+      .in('attempt_id', attemptIds)
+
+    if (mcqUserAnswersError) throw mcqUserAnswersError
+
+    // Get coding scores
+    const { data: codingUserAnswers, error: codingUserAnswersError } = await supabase
+      .from('user_coding_answers')
+      .select('attempt_id, points_earned')
+      .in('attempt_id', attemptIds)
+
+    if (codingUserAnswersError) throw codingUserAnswersError
+
+    // Step 5: Get total points for each test
+    const { data: mcqQuestionsData, error: mcqQuestionsError } = await supabase
+      .from('questions')
+      .select('test_id, points')
+      .in('test_id', userTestIds)
+
+    if (mcqQuestionsError) throw mcqQuestionsError
+
+    const { data: codingQuestionsData, error: codingQuestionsError } = await supabase
+      .from('coding_questions')
+      .select('test_id, points')
+      .in('test_id', userTestIds)
+
+    if (codingQuestionsError) throw codingQuestionsError
+
+    // Create lookup maps
+    const testsMap = new Map(testsData.map(test => [test.id, test]))
+    const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+    const pointsMap = new Map<string, number>()
+    const actualScoresMap = new Map<string, number>()
+
+    // Calculate total possible points for each test
+    if (mcqQuestionsData) {
+      mcqQuestionsData.forEach(q => {
+        const currentPoints = pointsMap.get(q.test_id) || 0
+        pointsMap.set(q.test_id, currentPoints + (q.points || 1))
+      })
+    }
+
+    if (codingQuestionsData) {
+      codingQuestionsData.forEach(q => {
+        const currentPoints = pointsMap.get(q.test_id) || 0
+        pointsMap.set(q.test_id, currentPoints + (q.points || 5))
+      })
+    }
+
+    // Calculate actual earned scores for each attempt
+    if (mcqUserAnswers) {
+      mcqUserAnswers.forEach(answer => {
+        const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+        actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+      })
+    }
+
+    if (codingUserAnswers) {
+      codingUserAnswers.forEach(answer => {
+        const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+        actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+      })
+    }
+
+    // DEBUGGING: Log the actual scores being calculated
+    console.log('Actual scores map:', Object.fromEntries(actualScoresMap))
+    console.log('Points map:', Object.fromEntries(pointsMap))
+
+    // Transform attempts data with correct scores
+    const transformedAttempts: Attempt[] = attemptData.map(attempt => {
+      const test = testsMap.get(attempt.test_id)
+      const profile = profilesMap.get(attempt.user_id)
+      const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
+      const actualScore = actualScoresMap.get(attempt.id) ?? attempt.score
+
+      // DEBUGGING: Log each attempt's score calculation
+      console.log(`Attempt ${attempt.id}: stored=${attempt.score}, calculated=${actualScoresMap.get(attempt.id)}, final=${actualScore}`)
+
+      return {
+        id: attempt.id,
+        test_id: attempt.test_id,
+        user_id: attempt.user_id,
+        score: actualScore, // Use calculated score
+        total_questions: attempt.total_questions,
+        total_points: totalPoints,
+        time_taken: attempt.time_taken,
+        completed_at: attempt.completed_at,
+        started_at: attempt.started_at,
+        user: {
+          full_name: profile?.full_name || null,
+          email: profile?.email || 'Unknown'
+        },
+        tests: {
+          title: test?.title || 'Unknown Test',
+          test_code: test?.test_code || 'N/A',
+          time_limit: test?.time_limit || 0,
+          total_questions: test?.total_questions || 0,
+          test_type: test?.test_type || 'mcq'
+        }
+      }
+    })
+
+    setAttempts(transformedAttempts)
+  } catch (error) {
+    console.error('Error loading data:', error)
+    setError('Failed to load data. Please refresh the page.')
+  }
+}, [])
   // Updated loadStudentAttempts function with correct score calculation
   const loadStudentAttempts = useCallback(async (userId: string) => {
     try {

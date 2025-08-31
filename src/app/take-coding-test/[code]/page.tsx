@@ -379,13 +379,13 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
     }
 
     // Verify the attempt exists and is not completed
-    const { data: existingAttempt, error: verifyError } = await supabase
+    const { data: existingAttempt, error: attemptVerifyError } = await supabase
       .from('test_attempts')
       .select('id, completed_at')
       .eq('id', attemptId)
 
-    if (verifyError) {
-      console.error('Attempt verification failed:', verifyError)
+    if (attemptVerifyError) {
+      console.error('Attempt verification failed:', attemptVerifyError)
       throw new Error('Failed to verify test attempt')
     }
 
@@ -427,8 +427,8 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
       }
     }
 
-    // Update the attempt as completed with final score - FIXED
-    const { error: updateError, count } = await supabase
+    // Update the attempt as completed with final score - SIMPLIFIED
+    const { error: updateError } = await supabase
       .from('test_attempts')
       .update({ 
         score: totalScore,
@@ -437,20 +437,69 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
         answers: userAnswers
       })
       .eq('id', attemptId)
-      .eq('user_id', user.id) // Additional safety check
 
     if (updateError) {
       console.error('Error updating test attempt:', updateError)
       throw new Error('Failed to save test completion: ' + updateError.message)
     }
 
-    // Check if update was successful
-    if (count === 0) {
-      throw new Error('Test attempt update failed - no records affected. Attempt may not exist.')
+    // Verify the update by fetching the record
+    const { data: verifyUpdate, error: updateVerifyError } = await supabase
+      .from('test_attempts')
+      .select('completed_at, score')
+      .eq('id', attemptId)
+      .single()
+
+    if (updateVerifyError || !verifyUpdate || !verifyUpdate.completed_at) {
+      throw new Error('Test completion verification failed')
     }
 
     console.log('Successfully marked test as completed with score:', totalScore)
-    console.log('Records updated:', count)
+    console.log('Verification - completed_at:', verifyUpdate.completed_at, 'score:', verifyUpdate.score)
+
+    // Ensure score synchronization
+    const ensureScoreSync = async (attemptId: string, totalScore: number) => {
+      try {
+        // Verify the score was saved correctly
+        const { data: attemptCheck, error: checkError } = await supabase
+          .from('test_attempts')
+          .select('score, completed_at')
+          .eq('id', attemptId)
+          .single()
+
+        if (checkError) {
+          console.error('Failed to verify attempt score:', checkError)
+          return false
+        }
+
+        console.log('Database verification - stored score:', attemptCheck.score, 'calculated score:', totalScore)
+
+        // If scores don't match, update again
+        if (attemptCheck.score !== totalScore) {
+          console.log('Score mismatch detected, updating...')
+          const { error: syncError } = await supabase
+            .from('test_attempts')
+            .update({ score: totalScore })
+            .eq('id', attemptId)
+
+          if (syncError) {
+            console.error('Failed to sync score:', syncError)
+            return false
+          }
+          
+          console.log('Score synchronized successfully')
+        }
+
+        return true
+      } catch (error) {
+        console.error('Error in score synchronization:', error)
+        return false
+      }
+    }
+
+    if (attemptId) {
+      await ensureScoreSync(attemptId, totalScore)
+    }
 
     const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
     
