@@ -24,19 +24,24 @@ interface TestData {
   test_type: string
 }
 
+interface FeedbackCriterion {
+  score: number;
+  feedback: string;
+}
+
 interface AIFeedback {
   total_score: number;
   breakdown: {
-      correctness?: number;
-      code_quality?: number;
-      efficiency?: number;
-      syntax?: number;
-      understanding?: number;
+    correctness?: number;
+    code_quality?: number;
+    efficiency?: number;
+    syntax?: number;
+    understanding?: number;
   };
   overall_feedback: string;
   suggestions: string;
   detailed_feedback?: {
-      [key: string]: FeedbackCriterion;
+    [key: string]: FeedbackCriterion;
   };
 }
 
@@ -51,20 +56,15 @@ interface UserCodingAnswer {
 }
 
 interface TestResult {
-    compilationStatus: string;
-    executionTime?: number;
-    memoryUsed?: number;
-    totalScore: number;
-    maxScore: number;
-    aiFeedback: AIFeedback;
+  compilationStatus: string;
+  executionTime?: number;
+  memoryUsed?: number;
+  totalScore: number;
+  maxScore: number;
+  aiFeedback: AIFeedback;
 }
 
-interface FeedbackCriterion {
-    score: number;
-    feedback: string;
-}
-
-const LANGUAGE_NAMES = {
+const LANGUAGE_NAMES: Record<number, string> = {
   50: 'C (GCC 9.2.0)',
   54: 'C++ (GCC 9.2.0)',
   62: 'Java',
@@ -72,7 +72,7 @@ const LANGUAGE_NAMES = {
   71: 'Python 3'
 }
 
-const MONACO_LANGUAGES = {
+const MONACO_LANGUAGES: Record<number, string> = {
   50: 'c',
   54: 'cpp',
   62: 'java',
@@ -80,7 +80,7 @@ const MONACO_LANGUAGES = {
   71: 'python'
 }
 
-const DEFAULT_CODE_TEMPLATES = {
+const DEFAULT_CODE_TEMPLATES: Record<number, string> = {
   50: `#include <stdio.h>\n\nint main() {\n    // Your code here\n    return 0;\n}`,
   54: `#include <iostream>\nusing namespace std;\n\nint main() {\n    // Your code here\n    return 0;\n}`,
   62: `public class Solution {\n    public static void main(String[] args) {\n        // Your code here\n    }\n}`,
@@ -191,7 +191,7 @@ export default function TakeCodingTestMain() {
         // Start fresh
         const initialAnswers = questionsData.map(q => ({
           question_id: q.id,
-          code_submission: DEFAULT_CODE_TEMPLATES[q.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || '',
+          code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
           compilation_status: 'Not Submitted',
           points_earned: 0
         }))
@@ -454,7 +454,7 @@ export default function TakeCodingTestMain() {
     }
 
     // Check if code is just the default template
-    const defaultTemplate = DEFAULT_CODE_TEMPLATES[currentQ.language_id as keyof typeof DEFAULT_CODE_TEMPLATES]
+    const defaultTemplate = DEFAULT_CODE_TEMPLATES[currentQ.language_id]
     if (currentAnswer.code_submission.trim() === defaultTemplate?.trim()) {
       alert('Please modify the code before running!')
       return
@@ -660,7 +660,7 @@ export default function TakeCodingTestMain() {
                 <h4 className="font-semibold text-green-800 mb-2">Supported Languages</h4>
                 <div className="text-green-700 space-y-1">
                   {Array.from(new Set(questions.map(q => q.language_id))).map(langId => (
-                    <div key={langId}>• {LANGUAGE_NAMES[langId as keyof typeof LANGUAGE_NAMES]}</div>
+                    <div key={langId}>• {LANGUAGE_NAMES[langId]}</div>
                   ))}
                 </div>
               </div>
@@ -705,7 +705,7 @@ export default function TakeCodingTestMain() {
               <h1 className="text-xl font-bold text-gray-900">{testData.title}</h1>
               <p className="text-sm text-gray-600">
                 Question {currentQuestion + 1} of {questions.length} •{' '}
-                {LANGUAGE_NAMES[currentQ?.language_id as keyof typeof LANGUAGE_NAMES]} • {currentQ?.points} points
+                {LANGUAGE_NAMES[currentQ?.language_id]} • {currentQ?.points} points
               </p>
             </div>
             <div className="flex items-center space-x-6">
@@ -749,7 +749,7 @@ export default function TakeCodingTestMain() {
               <div className="grid grid-cols-2 lg:grid-cols-1 gap-2">
                 {questions.map((q, index) => {
                   const answer = userAnswers[index]
-                  const defaultTemplate = DEFAULT_CODE_TEMPLATES[q.language_id as keyof typeof DEFAULT_CODE_TEMPLATES]
+                  const defaultTemplate = DEFAULT_CODE_TEMPLATES[q.language_id]
                   const hasCode = answer?.code_submission && answer.code_submission.trim() !== defaultTemplate?.trim()
                   const isCurrent = index === currentQuestion
                   const hasBeenGraded = answer?.points_earned !== undefined && answer?.compilation_status !== 'Not Submitted'
@@ -772,7 +772,7 @@ export default function TakeCodingTestMain() {
                       Q{index + 1}
                       <br />
                       <span className="text-xs">
-                        {q.points} pts • {LANGUAGE_NAMES[q.language_id as keyof typeof LANGUAGE_NAMES]?.split(' ')[0]}
+                        {q.points} pts • {LANGUAGE_NAMES[q.language_id]?.split(' ')[0]}
                       </span>
                       {hasBeenGraded && (
                         <div className="text-xs mt-1 font-bold">
@@ -838,12 +838,14 @@ export default function TakeCodingTestMain() {
                 <h3 className="text-lg font-medium text-gray-900">Code Editor</h3>
                 <div className="flex items-center space-x-4">
                   <span className="text-sm text-gray-500">
-                    {LANGUAGE_NAMES[currentQ?.language_id as keyof typeof LANGUAGE_NAMES]}
+                    {LANGUAGE_NAMES[currentQ?.language_id]}
                   </span>
                   <button
                     onClick={() => {
-                      const defaultCode = DEFAULT_CODE_TEMPLATES[currentQ?.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || ''
-                      updateCode(currentQ.id, defaultCode)
+                      const defaultCode = DEFAULT_CODE_TEMPLATES[currentQ?.language_id] || ''
+                      if (currentQ) {
+                        updateCode(currentQ.id, defaultCode)
+                      }
                     }}
                     disabled={testSubmitted}
                     className="text-sm bg-gray-100 hover:bg-gray-200 text-gray-700 px-3 py-1 rounded disabled:opacity-50"
@@ -854,8 +856,8 @@ export default function TakeCodingTestMain() {
               </div>
               
               <CodeEditor
-                code={currentAnswer?.code_submission || DEFAULT_CODE_TEMPLATES[currentQ?.language_id as keyof typeof DEFAULT_CODE_TEMPLATES] || ''}
-                language={MONACO_LANGUAGES[currentQ?.language_id as keyof typeof MONACO_LANGUAGES] || 'javascript'}
+                code={currentAnswer?.code_submission || DEFAULT_CODE_TEMPLATES[currentQ?.language_id] || ''}
+                language={MONACO_LANGUAGES[currentQ?.language_id] || 'javascript'}
                 height="500px"
                 onChange={(value) => {
                   if (currentQ) {
