@@ -37,7 +37,7 @@ export default function CreateCodingTest() {
       id: '1',
       title: '',
       problem_statement: '',
-      points: 5, // Default points
+      points: 5,
       language_id: 63 // Default to JavaScript
     }
   ])
@@ -73,7 +73,7 @@ export default function CreateCodingTest() {
       id: (questions.length + 1).toString(),
       title: '',
       problem_statement: '',
-      points: 5, // Default points
+      points: 5,
       language_id: 63
     }
     setQuestions([...questions, newQuestion])
@@ -147,7 +147,7 @@ export default function CreateCodingTest() {
         title: question.title.trim(),
         problem_statement: question.problem_statement.trim(),
         language_id: question.language_id,
-        points: 5, // Hardcoded points
+        points: question.points,
         created_by: user.id,
         question_number: index + 1,
         test_cases: [], // Empty array since we're not using test cases
@@ -210,7 +210,7 @@ export default function CreateCodingTest() {
       <div className="max-w-4xl mx-auto px-4 py-8">
         <div className="mb-8">
           <h1 className="text-3xl font-bold text-gray-900 mb-2">Create Coding Test</h1>
-          <p className="text-gray-600 font-medium">Design your coding challenge. Each question is worth 5 points.</p>
+          <p className="text-gray-600 font-medium">Design your coding challenge</p>
         </div>
 
         <div className="bg-white rounded-2xl shadow-xl p-8">
@@ -319,6 +319,20 @@ export default function CreateCodingTest() {
                       className="w-full px-4 py-2 border border-gray-300 rounded-lg"
                     />
                   </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Points
+                    </label>
+                    <input
+                      type="number"
+                      value={question.points}
+                      onChange={(e) => updateQuestion(index, 'points', Number(e.target.value))}
+                      min="1"
+                      max="20"
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
+                    />
+                  </div>
                 </div>
               </div>
             ))}
@@ -351,4 +365,3 @@ export default function CreateCodingTest() {
     </div>
   )
 }
-

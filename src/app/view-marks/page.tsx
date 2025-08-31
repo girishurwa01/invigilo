@@ -18,6 +18,7 @@ interface Test {
   show_results: boolean
   created_at: string
   updated_at: string
+  test_type: string
 }
 
 interface Attempt {
@@ -39,6 +40,7 @@ interface Attempt {
     test_code: string
     time_limit: number
     total_questions: number
+    test_type: string
   }
 }
 
@@ -57,6 +59,7 @@ interface StudentAttempt {
     show_results: boolean
     created_by: string
     created_by_name: string
+    test_type: string
   }
 }
 
@@ -76,33 +79,6 @@ interface LeaderboardEntry {
   isCurrentUser: boolean
 }
 
-interface RawTestAttempt {
-  id: string
-  test_id: string
-  user_id: string
-  score: number
-  total_questions: number
-  time_taken: number | null
-  completed_at: string | null
-  started_at: string
-}
-
-interface RawTestData {
-  id: string
-  title: string
-  test_code: string
-  show_results: boolean
-  created_by: string
-  time_limit: number
-  total_questions: number
-}
-
-interface RawProfileData {
-  id: string
-  full_name: string | null
-  email: string
-}
-
 export default function ViewMarksPage() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
@@ -117,169 +93,6 @@ export default function ViewMarksPage() {
   const [leaderboardData, setLeaderboardData] = useState<LeaderboardEntry[]>([])
   const router = useRouter()
 
-  // Load student's own attempts with improved data fetching
-  const loadStudentAttempts = useCallback(async (userId: string) => {
-    try {
-      setError(null)
-      
-      // Step 1: Get the student's test attempts
-      const { data: attemptData, error: attemptError } = await supabase
-        .from('test_attempts')
-        .select('*')
-        .eq('user_id', userId)
-        .order('started_at', { ascending: false })
-
-      if (attemptError) throw attemptError
-      
-      if (!attemptData || attemptData.length === 0) {
-        setStudentAttempts([])
-        return
-      }
-
-      // Step 2: Get unique test IDs
-      const testIds = [...new Set(attemptData.map(attempt => attempt.test_id))]
-      
-      // Step 3: Get test details
-      const { data: testsData, error: testsError } = await supabase
-        .from('tests')
-        .select('id, title, test_code, show_results, created_by, time_limit, total_questions')
-        .in('id', testIds)
-
-      if (testsError) throw testsError
-
-      // Step 4: Get creator profiles
-      const creatorIds = [...new Set(testsData?.map(test => test.created_by) || [])]
-      const { data: profilesData, error: profilesError } = await supabase
-        .from('profiles')
-        .select('id, full_name, email')
-        .in('id', creatorIds)
-
-      if (profilesError) throw profilesError
-
-      // Step 5: Get total points for each test
-      const { data: questionsData, error: questionsError } = await supabase
-        .from('questions')
-        .select('test_id, points')
-        .in('test_id', testIds)
-
-      if (questionsError) throw questionsError
-
-      // Create lookup maps
-      const testsMap = new Map(testsData?.map(test => [test.id, test]) || [])
-      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
-      const pointsMap = new Map<string, number>()
-
-      // Calculate total points for each test
-      if (questionsData) {
-        questionsData.forEach(q => {
-          const currentPoints = pointsMap.get(q.test_id) || 0
-          pointsMap.set(q.test_id, currentPoints + (q.points || 1))
-        })
-      }
-
-      // Step 6: Transform the data
-      const transformedAttempts: StudentAttempt[] = attemptData.map(attempt => {
-        const test = testsMap.get(attempt.test_id)
-        const creator = test ? profilesMap.get(test.created_by) : null
-        const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
-
-        return {
-          id: attempt.id,
-          test_id: attempt.test_id,
-          score: attempt.score,
-          total_points: totalPoints,
-          time_taken: attempt.time_taken,
-          completed_at: attempt.completed_at,
-          started_at: attempt.started_at,
-          test: {
-            id: test?.id || attempt.test_id,
-            title: test?.title || 'Unknown Test',
-            test_code: test?.test_code || 'N/A',
-            show_results: test?.show_results ?? false,
-            created_by: test?.created_by || '',
-            created_by_name: creator?.full_name || creator?.email || 'Unknown Teacher'
-          }
-        }
-      })
-
-      setStudentAttempts(transformedAttempts)
-    } catch (error) {
-      console.error('Error loading student attempts:', error)
-      setError('Failed to load your test attempts')
-    }
-  }, [])
-
-  // Load test leaderboard with improved data fetching
-  const loadTestLeaderboard = useCallback(async (testId: string) => {
-    try {
-      // Step 1: Get completed attempts for the test
-      const { data: attemptData, error: attemptError } = await supabase
-        .from('test_attempts')
-        .select('*')
-        .eq('test_id', testId)
-        .not('completed_at', 'is', null)
-        .order('score', { ascending: false })
-        .limit(10)
-
-      if (attemptError) throw attemptError
-      
-      if (!attemptData || attemptData.length === 0) {
-        setLeaderboardData([])
-        return
-      }
-
-      // Step 2: Get user profiles
-      const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
-      const { data: profilesData, error: profilesError } = await supabase
-        .from('profiles')
-        .select('id, full_name, email')
-        .in('id', userIds)
-
-      if (profilesError) throw profilesError
-
-      // Step 3: Get total points for the test
-      const { data: questionsData, error: questionsError } = await supabase
-        .from('questions')
-        .select('points')
-        .eq('test_id', testId)
-
-      if (questionsError) throw questionsError
-
-      const totalPoints = questionsData?.reduce((sum, q) => sum + (q.points || 1), 0) || 0
-
-      // Create profiles lookup
-      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
-
-      // Transform data
-      const transformedLeaderboard: LeaderboardEntry[] = attemptData.map((attempt, index) => {
-        const profile = profilesMap.get(attempt.user_id)
-        const effectiveTotalPoints = totalPoints || attempt.total_questions
-        
-        return {
-          id: attempt.id,
-          user_id: attempt.user_id,
-          score: attempt.score,
-          total_questions: attempt.total_questions,
-          total_points: effectiveTotalPoints,
-          completed_at: attempt.completed_at!,
-          profiles: {
-            full_name: profile?.full_name || null,
-            email: profile?.email || 'Unknown'
-          },
-          rank: index + 1,
-          percentage: effectiveTotalPoints > 0 ? ((attempt.score / effectiveTotalPoints) * 100).toFixed(1) : '0.0',
-          isCurrentUser: attempt.user_id === user?.id
-        }
-      })
-
-      setLeaderboardData(transformedLeaderboard)
-    } catch (error) {
-      console.error('Error loading leaderboard:', error)
-      setLeaderboardData([])
-    }
-  }, [user?.id])
-
-  // Optimized data loading function with improved error handling
   const loadAllData = useCallback(async (userId: string) => {
     try {
       setError(null)
@@ -325,38 +138,87 @@ export default function ViewMarksPage() {
 
       if (profilesError) throw profilesError
 
-      // Step 4: Get total points for each test
-      const { data: questionsData, error: questionsError } = await supabase
+      // Step 4: Get total points for each test (MCQ questions)
+      const { data: mcqQuestionsData, error: mcqQuestionsError } = await supabase
         .from('questions')
         .select('test_id, points')
         .in('test_id', userTestIds)
 
-      if (questionsError) throw questionsError
+      if (mcqQuestionsError) throw mcqQuestionsError
+
+      // Step 5: Get total points for each test (Coding questions)
+      const { data: codingQuestionsData, error: codingQuestionsError } = await supabase
+        .from('coding_questions')
+        .select('test_id, points')
+        .in('test_id', userTestIds)
+
+      if (codingQuestionsError) throw codingQuestionsError
+
+      // Step 6: Get actual scores from user answers (MCQ)
+      const attemptIds = attemptData.map(attempt => attempt.id)
+      const { data: mcqUserAnswers, error: mcqUserAnswersError } = await supabase
+        .from('user_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (mcqUserAnswersError) throw mcqUserAnswersError
+
+      // Step 7: Get actual scores from coding answers
+      const { data: codingUserAnswers, error: codingUserAnswersError } = await supabase
+        .from('user_coding_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (codingUserAnswersError) throw codingUserAnswersError
 
       // Create lookup maps
       const testsMap = new Map(testsData.map(test => [test.id, test]))
       const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
       const pointsMap = new Map<string, number>()
+      const actualScoresMap = new Map<string, number>()
 
-      // Calculate total points for each test
-      if (questionsData) {
-        questionsData.forEach(q => {
+      // Calculate total possible points for each test (MCQ + Coding)
+      if (mcqQuestionsData) {
+        mcqQuestionsData.forEach(q => {
           const currentPoints = pointsMap.get(q.test_id) || 0
           pointsMap.set(q.test_id, currentPoints + (q.points || 1))
         })
       }
 
-      // Transform attempts data
+      if (codingQuestionsData) {
+        codingQuestionsData.forEach(q => {
+          const currentPoints = pointsMap.get(q.test_id) || 0
+          pointsMap.set(q.test_id, currentPoints + (q.points || 5))
+        })
+      }
+
+      // Calculate actual earned scores for each attempt
+      if (mcqUserAnswers) {
+        mcqUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      if (codingUserAnswers) {
+        codingUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      // Transform attempts data with correct scores
       const transformedAttempts: Attempt[] = attemptData.map(attempt => {
         const test = testsMap.get(attempt.test_id)
         const profile = profilesMap.get(attempt.user_id)
         const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
+        const actualScore = actualScoresMap.get(attempt.id) ?? attempt.score // Use calculated score, fallback to stored score
 
         return {
           id: attempt.id,
           test_id: attempt.test_id,
           user_id: attempt.user_id,
-          score: attempt.score,
+          score: actualScore, // Use calculated score instead of stored score
           total_questions: attempt.total_questions,
           total_points: totalPoints,
           time_taken: attempt.time_taken,
@@ -370,7 +232,8 @@ export default function ViewMarksPage() {
             title: test?.title || 'Unknown Test',
             test_code: test?.test_code || 'N/A',
             time_limit: test?.time_limit || 0,
-            total_questions: test?.total_questions || 0
+            total_questions: test?.total_questions || 0,
+            test_type: test?.test_type || 'mcq'
           }
         }
       })
@@ -381,6 +244,267 @@ export default function ViewMarksPage() {
       setError('Failed to load data. Please refresh the page.')
     }
   }, [])
+
+  const loadStudentAttempts = useCallback(async (userId: string) => {
+    try {
+      setError(null)
+      
+      // Step 1: Get the student's test attempts
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('*')
+        .eq('user_id', userId)
+        .order('started_at', { ascending: false })
+
+      if (attemptError) throw attemptError
+      
+      if (!attemptData || attemptData.length === 0) {
+        setStudentAttempts([])
+        return
+      }
+
+      // Step 2: Get unique test IDs
+      const testIds = [...new Set(attemptData.map(attempt => attempt.test_id))]
+      
+      // Step 3: Get test details including test_type
+      const { data: testsData, error: testsError } = await supabase
+        .from('tests')
+        .select('id, title, test_code, show_results, created_by, time_limit, total_questions, test_type')
+        .in('id', testIds)
+
+      if (testsError) throw testsError
+
+      // Step 4: Get creator profiles
+      const creatorIds = [...new Set(testsData?.map(test => test.created_by) || [])]
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', creatorIds)
+
+      if (profilesError) throw profilesError
+
+      // Step 5: Get total points for each test (both MCQ and coding)
+      const { data: mcqQuestionsData, error: mcqQuestionsError } = await supabase
+        .from('questions')
+        .select('test_id, points')
+        .in('test_id', testIds)
+
+      if (mcqQuestionsError) throw mcqQuestionsError
+
+      const { data: codingQuestionsData, error: codingQuestionsError } = await supabase
+        .from('coding_questions')
+        .select('test_id, points')
+        .in('test_id', testIds)
+
+      if (codingQuestionsError) throw codingQuestionsError
+
+      // Step 6: Get actual scores from user answers (MCQ)
+      const attemptIds = attemptData.map(attempt => attempt.id)
+      const { data: mcqUserAnswers, error: mcqUserAnswersError } = await supabase
+        .from('user_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (mcqUserAnswersError) throw mcqUserAnswersError
+
+      // Step 7: Get actual scores from coding answers
+      const { data: codingUserAnswers, error: codingUserAnswersError } = await supabase
+        .from('user_coding_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (codingUserAnswersError) throw codingUserAnswersError
+
+      // Create lookup maps
+      const testsMap = new Map(testsData?.map(test => [test.id, test]) || [])
+      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+      const pointsMap = new Map<string, number>()
+      const actualScoresMap = new Map<string, number>()
+
+      // Calculate total possible points for each test (MCQ + Coding)
+      if (mcqQuestionsData) {
+        mcqQuestionsData.forEach(q => {
+          const currentPoints = pointsMap.get(q.test_id) || 0
+          pointsMap.set(q.test_id, currentPoints + (q.points || 1))
+        })
+      }
+
+      if (codingQuestionsData) {
+        codingQuestionsData.forEach(q => {
+          const currentPoints = pointsMap.get(q.test_id) || 0
+          pointsMap.set(q.test_id, currentPoints + (q.points || 5))
+        })
+      }
+
+      // Calculate actual earned scores for each attempt
+      if (mcqUserAnswers) {
+        mcqUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      if (codingUserAnswers) {
+        codingUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      // Step 8: Transform the data with correct scores
+      const transformedAttempts: StudentAttempt[] = attemptData.map(attempt => {
+        const test = testsMap.get(attempt.test_id)
+        const creator = test ? profilesMap.get(test.created_by) : null
+        const totalPoints = pointsMap.get(attempt.test_id) || test?.total_questions || 1
+        const actualScore = actualScoresMap.get(attempt.id) ?? attempt.score // Use calculated score
+
+        return {
+          id: attempt.id,
+          test_id: attempt.test_id,
+          score: actualScore, // Use the correctly calculated score
+          total_points: totalPoints,
+          time_taken: attempt.time_taken,
+          completed_at: attempt.completed_at,
+          started_at: attempt.started_at,
+          test: {
+            id: test?.id || attempt.test_id,
+            title: test?.title || 'Unknown Test',
+            test_code: test?.test_code || 'N/A',
+            show_results: test?.show_results ?? false,
+            created_by: test?.created_by || '',
+            created_by_name: creator?.full_name || creator?.email || 'Unknown Teacher',
+            test_type: test?.test_type || 'mcq'
+          }
+        }
+      })
+
+      setStudentAttempts(transformedAttempts)
+    } catch (error) {
+      console.error('Error loading student attempts:', error)
+      setError('Failed to load your test attempts')
+    }
+  }, [])
+
+  const loadTestLeaderboard = useCallback(async (testId: string) => {
+    try {
+      // Step 1: Get completed attempts for the test
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('*')
+        .eq('test_id', testId)
+        .not('completed_at', 'is', null)
+        .order('score', { ascending: false }) // Initial sort for performance, will be re-sorted later
+        .limit(50) // Get more records to sort correctly later
+
+      if (attemptError) throw attemptError
+      
+      if (!attemptData || attemptData.length === 0) {
+        setLeaderboardData([])
+        return
+      }
+
+      // Step 2: Get user profiles
+      const userIds = [...new Set(attemptData.map(attempt => attempt.user_id))]
+      const { data: profilesData, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, email')
+        .in('id', userIds)
+
+      if (profilesError) throw profilesError
+
+      // Step 3: Get total points for the test (both MCQ and coding)
+      const { data: mcqQuestionsData, error: mcqQuestionsError } = await supabase
+        .from('questions')
+        .select('points')
+        .eq('test_id', testId)
+
+      if (mcqQuestionsError) throw mcqQuestionsError
+
+      const { data: codingQuestionsData, error: codingQuestionsError } = await supabase
+        .from('coding_questions')
+        .select('points')
+        .eq('test_id', testId)
+
+      if (codingQuestionsError) throw codingQuestionsError
+
+      // Step 4: Get actual scores from user answers (MCQ)
+      const attemptIds = attemptData.map(attempt => attempt.id)
+      const { data: mcqUserAnswers, error: mcqUserAnswersError } = await supabase
+        .from('user_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (mcqUserAnswersError) throw mcqUserAnswersError
+
+      // Step 5: Get actual scores from coding answers
+      const { data: codingUserAnswers, error: codingUserAnswersError } = await supabase
+        .from('user_coding_answers')
+        .select('attempt_id, points_earned')
+        .in('attempt_id', attemptIds)
+
+      if (codingUserAnswersError) throw codingUserAnswersError
+
+      const mcqPoints = mcqQuestionsData?.reduce((sum, q) => sum + (q.points || 1), 0) || 0
+      const codingPoints = codingQuestionsData?.reduce((sum, q) => sum + (q.points || 5), 0) || 0
+      const totalPoints = mcqPoints + codingPoints
+
+      // Create lookup maps
+      const profilesMap = new Map(profilesData?.map(profile => [profile.id, profile]) || [])
+      const actualScoresMap = new Map<string, number>()
+
+      // Calculate actual earned scores for each attempt
+      if (mcqUserAnswers) {
+        mcqUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      if (codingUserAnswers) {
+        codingUserAnswers.forEach(answer => {
+          const currentScore = actualScoresMap.get(answer.attempt_id) || 0
+          actualScoresMap.set(answer.attempt_id, currentScore + (answer.points_earned || 0))
+        })
+      }
+
+      // Transform data with correct scores
+      const transformedLeaderboard: LeaderboardEntry[] = attemptData.map((attempt) => {
+        const profile = profilesMap.get(attempt.user_id)
+        const effectiveTotalPoints = totalPoints || attempt.total_questions
+        const actualScore = actualScoresMap.get(attempt.id) ?? attempt.score // Use calculated score
+        
+        return {
+          id: attempt.id,
+          user_id: attempt.user_id,
+          score: actualScore, // Use the correctly calculated score
+          total_questions: attempt.total_questions,
+          total_points: effectiveTotalPoints,
+          completed_at: attempt.completed_at!,
+          profiles: {
+            full_name: profile?.full_name || null,
+            email: profile?.email || 'Unknown'
+          },
+          rank: 0, // Will be set after sorting
+          percentage: effectiveTotalPoints > 0 ? ((actualScore / effectiveTotalPoints) * 100).toFixed(1) : '0.0',
+          isCurrentUser: attempt.user_id === user?.id
+        }
+      })
+
+      // Sort by actual score and assign ranks
+      const sortedLeaderboard = transformedLeaderboard
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+        .map((entry, index) => ({
+          ...entry,
+          rank: index + 1
+        }))
+
+      setLeaderboardData(sortedLeaderboard)
+    } catch (error) {
+      console.error('Error loading leaderboard:', error)
+      setLeaderboardData([])
+    }
+  }, [user?.id])
 
   // Initialize component
   useEffect(() => {
@@ -471,7 +595,7 @@ export default function ViewMarksPage() {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
       subscription.unsubscribe()
     }
-  }, [router, user?.id, loadAllData, loadStudentAttempts])
+  }, [router, user, loadAllData, loadStudentAttempts])
 
   const deleteTest = async (testId: string) => {
     if (!confirm('Are you sure you want to delete this test? This action cannot be undone.')) {
@@ -564,12 +688,6 @@ export default function ViewMarksPage() {
     })
   }
 
-  const getLeaderboard = (atts: Attempt[]) => {
-    const completed = atts.filter((a) => a.completed_at !== null)
-    const sorted = [...completed].sort((a, b) => b.score - a.score)
-    return sorted.slice(0, 3)
-  }
-
   const downloadResults = (testAttempts: Attempt[], testTitle: string) => {
     const sortedAttempts = sortAttempts(testAttempts)
     
@@ -581,6 +699,7 @@ export default function ViewMarksPage() {
       'Time Taken': a.time_taken ? `${a.time_taken} min` : 'N/A',
       'Started At': formatDate(a.started_at),
       'Completed At': a.completed_at ? formatDate(a.completed_at) : 'In Progress',
+      'Test Type': a.tests.test_type || 'mcq'
     }))
     
     const ws = XLSX.utils.json_to_sheet(data)
@@ -600,6 +719,22 @@ export default function ViewMarksPage() {
     await loadTestLeaderboard(testId)
     setSelectedTestId(testId)
     setShowLeaderboard(true)
+  }
+
+  const getTestTypeLabel = (testType: string) => {
+    switch (testType) {
+      case 'mcq': return 'MCQ'
+      case 'coding': return 'Coding'
+      default: return 'MCQ'
+    }
+  }
+
+  const getTestTypeColor = (testType: string) => {
+    switch (testType) {
+      case 'mcq': return 'bg-blue-100 text-blue-800'
+      case 'coding': return 'bg-green-100 text-green-800'
+      default: return 'bg-blue-100 text-blue-800'
+    }
   }
 
   if (loading) {
@@ -732,6 +867,9 @@ export default function ViewMarksPage() {
                             Code
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Type
+                          </th>
+                          <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                             Questions
                           </th>
                           <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
@@ -765,6 +903,11 @@ export default function ViewMarksPage() {
                             <td className="px-6 py-4 whitespace-nowrap">
                               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                                 {test.test_code}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getTestTypeColor(test.test_type)}`}>
+                                {getTestTypeLabel(test.test_type)}
                               </span>
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
@@ -806,28 +949,17 @@ export default function ViewMarksPage() {
                               {formatDate(test.created_at)}
                             </td>
                             <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                              <div className="flex space-x-2">
-                                <Link href={`/edit-test/${test.id}`}>
-                                  <button className="text-indigo-600 hover:text-indigo-900 transition-colors">
-                                    Edit
-                                  </button>
+                              <div className="flex items-center space-x-3">
+                                <Link href={`/edit-test/${test.id}`} className="text-indigo-600 hover:text-indigo-900 transition-colors flex items-center">
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.5L14.732 3.732z" /></svg>
+                                    <span className="ml-1">Edit</span>
                                 </Link>
-                                {test.attemptCount > 0 && (
-                                  <button
-                                    onClick={() => {
-                                      setSelectedTestId(test.id)
-                                      setActiveTab('attempts')
-                                    }}
-                                    className="text-blue-600 hover:text-blue-900 transition-colors"
-                                  >
-                                    View Results
-                                  </button>
-                                )}
                                 <button
                                   onClick={() => deleteTest(test.id)}
-                                  className="text-red-600 hover:text-red-900 transition-colors"
+                                  className="text-red-600 hover:text-red-900 transition-colors flex items-center"
                                 >
-                                  Delete
+                                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                                  <span className="ml-1">Delete</span>
                                 </button>
                               </div>
                             </td>
@@ -860,6 +992,12 @@ export default function ViewMarksPage() {
                             <h3 className="text-lg font-semibold text-gray-900">{attempt.test.title}</h3>
                             <div className="flex items-center space-x-4 text-sm text-gray-600 mt-1">
                               <span>Code: {attempt.test.test_code}</span>
+                              <span>•</span>
+                              <span>Type: 
+                                <span className={`ml-1 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getTestTypeColor(attempt.test.test_type)}`}>
+                                  {getTestTypeLabel(attempt.test.test_type)}
+                                </span>
+                              </span>
                               <span>•</span>
                               <span>By: {attempt.test.created_by_name}</span>
                             </div>
@@ -955,10 +1093,15 @@ export default function ViewMarksPage() {
                           >
                             <h3 className="text-lg font-semibold text-gray-900 mb-2">{test.title}</h3>
                             <p className="text-sm text-gray-600 mb-4 line-clamp-2">{test.description || 'No description'}</p>
-                            <div className="flex justify-between items-center">
+                            <div className="flex justify-between items-center mb-2">
                               <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
                                 {test.test_code}
                               </span>
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getTestTypeColor(test.test_type)}`}>
+                                {getTestTypeLabel(test.test_type)}
+                              </span>
+                            </div>
+                            <div className="flex justify-between items-center">
                               <span className={`text-sm font-medium ${
                                 test.attemptCount > 0 ? 'text-blue-600' : 'text-gray-500'
                               }`}>
@@ -989,7 +1132,13 @@ export default function ViewMarksPage() {
                         <h2 className="text-xl font-semibold text-gray-900">
                           {selectedTest?.title} Results
                         </h2>
-                        <p className="text-sm text-gray-600">Code: {selectedTest?.test_code}</p>
+                        <div className="flex items-center space-x-4 text-sm text-gray-600">
+                          <span>Code: {selectedTest?.test_code}</span>
+                          <span>•</span>
+                          <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${getTestTypeColor(selectedTest?.test_type || 'mcq')}`}>
+                            {getTestTypeLabel(selectedTest?.test_type || 'mcq')}
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -1018,7 +1167,12 @@ export default function ViewMarksPage() {
                           
                           <div className="flex space-x-2">
                             <button
-                              onClick={() => setShowLeaderboard(!showLeaderboard)}
+                              onClick={() => {
+                                if (!showLeaderboard) {
+                                  loadTestLeaderboard(selectedTestId)
+                                }
+                                setShowLeaderboard(!showLeaderboard)
+                              }}
                               className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
                             >
                               {showLeaderboard ? 'Hide Leaderboard' : 'Show Leaderboard'}
@@ -1031,34 +1185,11 @@ export default function ViewMarksPage() {
                             </button>
                           </div>
                         </div>
-
+                        
                         {showLeaderboard && (
                           <div className="bg-gray-50 p-4 rounded-lg mb-6">
                             <h4 className="text-md font-semibold text-gray-900 mb-4">Leaderboard</h4>
-                            {(() => {
-                              const leaderboard = getLeaderboard(selectedTestAttempts)
-                              const medals = ['🥇', '🥈', '🥉']
-                              
-                              return leaderboard.length > 0 ? (
-                                <ul className="space-y-2">
-                                  {leaderboard.map((top, index) => (
-                                    <li key={top.id} className="flex items-center space-x-4">
-                                      <span className="text-2xl">{medals[index]}</span>
-                                      <div>
-                                        <div className="font-medium text-gray-900">
-                                          {top.user.full_name || 'Anonymous'} ({top.user.email})
-                                        </div>
-                                        <div className="text-sm text-gray-600">
-                                          Score: {top.score} / {top.total_points} ({calculatePercentage(top.score, top.total_points)}%)
-                                        </div>
-                                      </div>
-                                    </li>
-                                  ))}
-                                </ul>
-                              ) : (
-                                <div className="text-gray-500">No completed attempts yet</div>
-                              )
-                            })()}
+                            <LeaderboardComponent leaderboardData={leaderboardData} loading={false} />
                           </div>
                         )}
 
@@ -1135,14 +1266,12 @@ export default function ViewMarksPage() {
                           </div>
                           <div className="bg-purple-50 p-4 rounded-lg">
                             <div className="text-2xl font-bold text-purple-600">
-                              {selectedTestAttempts.length > 0 
-                                ? (selectedTestAttempts
-                                    .filter(a => a.completed_at)
-                                    .reduce((sum, a) => sum + parseFloat(calculatePercentage(a.score, a.total_points)), 0) / 
-                                   selectedTestAttempts.filter(a => a.completed_at).length
-                                  ).toFixed(1)
-                                : '0.0'
-                              }%
+                              {(() => {
+                                const completed = selectedTestAttempts.filter(a => a.completed_at);
+                                if (completed.length === 0) return '0.0';
+                                const avg = completed.reduce((sum, a) => sum + parseFloat(calculatePercentage(a.score, a.total_points)), 0) / completed.length;
+                                return avg.toFixed(1);
+                              })()}%
                             </div>
                             <div className="text-sm text-gray-600">Average Score</div>
                           </div>
@@ -1159,15 +1288,15 @@ export default function ViewMarksPage() {
         {/* Leaderboard Modal */}
         {showLeaderboard && selectedTestId && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-96 overflow-y-auto">
+            <div className="bg-white rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-semibold">Test Leaderboard</h3>
                 <button
                   onClick={() => {
                     setShowLeaderboard(false)
-                    setSelectedTestId(null)
+                    // Keep selectedTestId to avoid going back to test list
                   }}
-                  className="text-gray-400 hover:text-gray-600 text-xl font-semibold"
+                  className="text-gray-400 hover:text-gray-600 text-2xl font-semibold"
                 >
                   ×
                 </button>
@@ -1175,7 +1304,7 @@ export default function ViewMarksPage() {
               
               <LeaderboardComponent 
                 leaderboardData={leaderboardData} 
-                loading={false}
+                loading={false} // Loading is handled on the main page
               />
             </div>
           </div>
@@ -1236,7 +1365,7 @@ function LeaderboardComponent({ leaderboardData, loading }: LeaderboardComponent
               : 'bg-gray-50 border-gray-200'
           }`}
         >
-          <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-4 flex-1 min-w-0">
             <div className="text-2xl min-w-[3rem] text-center">
               {entry.rank <= 3 ? medals[entry.rank - 1] : `#${entry.rank}`}
             </div>
@@ -1250,7 +1379,7 @@ function LeaderboardComponent({ leaderboardData, loading }: LeaderboardComponent
               <div className="text-sm text-gray-600 truncate">{entry.profiles?.email}</div>
             </div>
           </div>
-          <div className="text-right">
+          <div className="text-right ml-4">
             <div className="font-bold text-gray-900">
               {entry.score} / {entry.total_points}
             </div>
