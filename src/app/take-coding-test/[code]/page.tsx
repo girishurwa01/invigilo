@@ -359,7 +359,7 @@ export default function TakeCodingTestMain() {
       
       alert(
         reason === 'timeUp'
-          ? `Time&apos;s up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
+          ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
           : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
       )
 
@@ -646,7 +646,7 @@ export default function TakeCodingTestMain() {
               <h3 className="font-semibold text-blue-800 mb-3">Coding Test Instructions</h3>
               <ul className="text-sm text-blue-700 space-y-2">
                 <li>• Write code in the provided editor for each question</li>
-                <li>• Test your code using the 'Run & Grade' button to see your score</li>
+                <li>• Test your code using the &apos;Run & Grade&apos; button to see your score</li>
                 <li>• Your code will be evaluated by AI based on multiple criteria</li>
                 <li>• Each question has its own point value and programming language</li>
                 <li>• You can navigate between questions freely</li>
