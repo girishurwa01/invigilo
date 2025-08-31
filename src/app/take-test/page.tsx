@@ -6,51 +6,44 @@ import Link from 'next/link'
 import { User } from '@supabase/supabase-js'
 import { supabase } from '@/app/lib/supabase'
 
-interface CodingQuestion {
+interface TestInfo {
   id: string
+  test_code: string
   title: string
-  problem_statement: string
-  points: number
-  language_id: number
+  description: string | null
+  time_limit: number
+  total_questions: number
+  created_by: string
+  creator_name: string
+  is_active: boolean
 }
 
-const LANGUAGE_OPTIONS = [
-  { id: 50, name: 'C (GCC 9.2.0)' },
-  { id: 54, name: 'C++ (GCC 9.2.0)' },
-  { id: 62, name: 'Java' },
-  { id: 63, name: 'JavaScript (Node.js)' },
-  { id: 71, name: 'Python 3' }
-]
-
-export default function CreateCodingTest() {
+export default function AnswerTestPage() {
   const [user, setUser] = useState<User | null>(null)
   const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
+  const [testCode, setTestCode] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [testInfo, setTestInfo] = useState<TestInfo | null>(null)
+  const [error, setError] = useState('')
   const router = useRouter()
-
-  // Test form data
-  const [testTitle, setTestTitle] = useState('')
-  const [testDescription, setTestDescription] = useState('')
-  const [timeLimit, setTimeLimit] = useState(60)
-  const [questions, setQuestions] = useState<CodingQuestion[]>([
-    {
-      id: '1',
-      title: '',
-      problem_statement: '',
-      points: 5, // Default points
-      language_id: 63 // Default to JavaScript
-    }
-  ])
 
   useEffect(() => {
     const getSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession()
-      if (!session?.user) {
-        router.push('/login')
-        return
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (error) throw new Error(error.message);
+        if (!session?.user) {
+          router.push('/login');
+          return;
+        }
+        setUser(session.user);
+        setLoading(false);
+      } catch (error: unknown) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+        console.error('Error fetching session:', error);
+        setError('Failed to load session. Please try again.');
+        setLoading(false);
       }
-      setUser(session.user)
-      setLoading(false)
     }
 
     getSession()
@@ -68,109 +61,76 @@ export default function CreateCodingTest() {
     return () => subscription.unsubscribe()
   }, [router])
 
-  const addQuestion = () => {
-    const newQuestion: CodingQuestion = {
-      id: (questions.length + 1).toString(),
-      title: '',
-      problem_statement: '',
-      points: 5, // Default points
-      language_id: 63
-    }
-    setQuestions([...questions, newQuestion])
-  }
-
-  const removeQuestion = (index: number) => {
-    if (questions.length > 1) {
-      const updatedQuestions = questions.filter((_, i) => i !== index)
-      setQuestions(updatedQuestions)
-    }
-  }
-
-  const updateQuestion = (index: number, field: keyof CodingQuestion, value: string | number) => {
-    const updatedQuestions = [...questions]
-    updatedQuestions[index] = { ...updatedQuestions[index], [field]: value }
-    setQuestions(updatedQuestions)
-  }
-
-  const validateForm = () => {
-    if (!testTitle.trim()) {
-      alert('Please enter a test title')
-      return false
-    }
-
-    for (const q of questions) {
-      if (!q.title.trim() || !q.problem_statement.trim()) {
-        alert('Please fill in all question fields')
-        return false
-      }
-    }
-
-    return true
-  }
-
-  const saveTest = async () => {
-    if (!validateForm() || !user) {
+  const searchTest = async () => {
+    if (!testCode.trim()) {
+      setError('Please enter a test code.')
       return
     }
 
-    setSaving(true)
+    setSearching(true)
+    setError('')
+    setTestInfo(null)
+
     try {
-      // Generate test code
-      const { data: testCodeData, error: testCodeError } = await supabase
-        .rpc('generate_test_code')
-
-      if (testCodeError) throw new Error('Failed to generate test code')
-      const testCode = testCodeData
-
-      // Create test
-      const { data: createdTest, error: testError } = await supabase
+      const { data: testData, error: testError } = await supabase
         .from('tests')
-        .insert({
-          test_code: testCode,
-          title: testTitle.trim(),
-          description: testDescription.trim() || null,
-          created_by: user.id,
-          time_limit: timeLimit,
-          total_questions: questions.length,
-          is_active: true,
-          show_results: true,
-          test_type: 'coding'
-        })
-        .select()
+        .select(`
+          *,
+          profiles:created_by (
+            full_name,
+            username,
+            email
+          )
+        `)
+        .ilike('test_code', testCode.toLowerCase()) // Case-insensitive match
+        .eq('is_active', true)
         .single()
 
-      if (testError) throw testError
+      if (testError || !testData) {
+        setError('Test not found or inactive. Please check the test code or contact your instructor.')
+        return
+      }
 
-      // Create coding questions
-      const questionsToInsert = questions.map((question, index) => ({
-        test_id: createdTest.id,
-        title: question.title.trim(),
-        problem_statement: question.problem_statement.trim(),
-        language_id: question.language_id,
-        points: 5, // Hardcoded points
-        created_by: user.id,
-        question_number: index + 1,
-        test_cases: [], // Empty array since we're not using test cases
-        default_code: '', // Empty since teacher doesn't provide default code
-        solution_template: '' // Empty
-      }))
+      // Check if user has already attempted this test
+      const { data: attemptData, error: attemptError } = await supabase
+        .from('test_attempts')
+        .select('id')
+        .eq('test_id', testData.id)
+        .eq('user_id', user?.id)
+        .single()
 
-      const { error: questionsError } = await supabase
-        .from('coding_questions')
-        .insert(questionsToInsert)
+      if (attemptError && attemptError.code !== 'PGRST116') {
+        throw new Error(attemptError.message)
+      }
 
-      if (questionsError) throw questionsError
+      if (attemptData) {
+        setError('You have already attempted this test.')
+        return
+      }
 
-      alert(`Test created successfully! Test Code: ${testCode}`)
-      router.push('/view-marks')
+      setTestInfo({
+        id: testData.id,
+        test_code: testData.test_code,
+        title: testData.title,
+        description: testData.description,
+        time_limit: testData.time_limit,
+        total_questions: testData.total_questions,
+        created_by: testData.created_by,
+        creator_name: testData.profiles?.full_name || testData.profiles?.username || testData.profiles?.email || 'Unknown',
+        is_active: testData.is_active
+      })
     } catch (error: unknown) {
-        if (error instanceof Error) {
-            alert(`Error creating test: ${error.message}`)
-        } else {
-            alert('An unknown error occurred while creating the test.')
-        }
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      console.error('Error searching test:', error)
+      setError('An error occurred while searching for the test. Please try again.')
     } finally {
-      setSaving(false)
+      setSearching(false)
+    }
+  }
+
+  const startTest = () => {
+    if (testInfo) {
+      router.push(`/take-test/${testInfo.test_code}`)
     }
   }
 
@@ -178,6 +138,25 @@ export default function CreateCodingTest() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
         <div className="text-xl text-gray-600">Loading...</div>
+      </div>
+    )
+  }
+
+  if (error && !testInfo && !searching) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-xl text-red-600 mb-4">{error}</div>
+          <button
+            onClick={() => {
+              setError('')
+              setTestCode('')
+            }}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-lg"
+          >
+            Try Again
+          </button>
+        </div>
       </div>
     )
   }
@@ -192,12 +171,12 @@ export default function CreateCodingTest() {
               Invigilo
             </Link>
             <div className="flex items-center space-x-4">
-              <span className="text-gray-700 font-medium">
+              <span className="text-gray-700">
                 Welcome, {user?.user_metadata?.full_name || user?.email}
               </span>
               <button
                 onClick={() => supabase.auth.signOut()}
-                className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg font-medium"
+                className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg"
               >
                 Sign Out
               </button>
@@ -207,148 +186,156 @@ export default function CreateCodingTest() {
       </div>
 
       {/* Main Content */}
-      <div className="max-w-4xl mx-auto px-4 py-8">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Create Coding Test</h1>
-          <p className="text-gray-600 font-medium">Design your coding challenge. Each question is worth 5 points.</p>
+      <div className="max-w-2xl mx-auto px-4 py-12">
+        <div className="text-center mb-12">
+          <h1 className="text-4xl font-bold text-gray-900 mb-4">Answer Test</h1>
+          <p className="text-xl text-gray-600">Enter the test code to start your examination</p>
         </div>
 
         <div className="bg-white rounded-2xl shadow-xl p-8">
-          {/* Test Information */}
-          <div className="mb-8">
-            <h2 className="text-xl font-semibold text-gray-900 mb-6">Test Information</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Test Title *
-                </label>
-                <input
-                  type="text"
-                  value={testTitle}
-                  onChange={(e) => setTestTitle(e.target.value)}
-                  placeholder="Enter test title"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg"
-                />
+          {!testInfo ? (
+            <>
+              <div className="text-center mb-8">
+                <div className="bg-green-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                  </svg>
+                </div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">Enter Test Code</h2>
+                <p className="text-gray-600">Get the 6-character test code from your instructor</p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Time Limit (minutes)
-                </label>
-                <input
-                  type="number"
-                  value={timeLimit}
-                  onChange={(e) => setTimeLimit(Number(e.target.value))}
-                  min="1"
-                  max="180"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg"
-                />
-              </div>
-            </div>
-            <div className="mt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Description
-              </label>
-              <textarea
-                value={testDescription}
-                onChange={(e) => setTestDescription(e.target.value)}
-                placeholder="Enter test description (optional)"
-                rows={3}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg"
-              />
-            </div>
-          </div>
 
-          {/* Questions */}
-          <div className="mb-8">
-            <h2 className="text-xl font-semibold text-gray-900 mb-6">Coding Questions ({questions.length})</h2>
-
-            {questions.map((question, index) => (
-              <div key={question.id} className="bg-gray-50 rounded-xl p-6 mb-6">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-lg font-medium text-gray-900">Question {index + 1}</h3>
-                  {questions.length > 1 && (
-                    <button
-                      onClick={() => removeQuestion(index)}
-                      className="text-red-600 hover:text-red-800 p-2 rounded-lg"
-                    >
-                      Remove
-                    </button>
-                  )}
+              <div className="space-y-6">
+                <div>
+                  <label htmlFor="testCode" className="block text-sm font-medium text-gray-700 mb-2">
+                    Test Code
+                  </label>
+                  <input
+                    id="testCode"
+                    type="text"
+                    value={testCode}
+                    onChange={(e) => setTestCode(e.target.value.toLowerCase())}
+                    placeholder="Enter 6-character test code"
+                    maxLength={6}
+                    className="w-full px-4 py-3 text-lg text-center tracking-widest uppercase border-2 border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-transparent"
+                    onKeyDown={(e) => e.key === 'Enter' && !searching && searchTest()}
+                    aria-describedby="testCodeHelp"
+                  />
+                  <p id="testCodeHelp" className="text-xs text-gray-500 mt-1">Example: abc123</p>
                 </div>
 
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Question Title *
-                    </label>
-                    <input
-                      type="text"
-                      value={question.title}
-                      onChange={(e) => updateQuestion(index, 'title', e.target.value)}
-                      placeholder="Enter question title"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    />
+                {error && (
+                  <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                    <div className="flex items-center">
+                      <svg className="w-5 h-5 text-red-400 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                      </svg>
+                      <span className="text-red-800 text-sm">{error}</span>
+                    </div>
                   </div>
-                  
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Programming Language *
-                    </label>
-                    <select
-                      value={question.language_id}
-                      onChange={(e) => updateQuestion(index, 'language_id', Number(e.target.value))}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    >
-                      {LANGUAGE_OPTIONS.map(lang => (
-                        <option key={lang.id} value={lang.id}>
-                          {lang.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                )}
 
+                <button
+                  onClick={searchTest}
+                  disabled={searching || !testCode.trim()}
+                  className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-4 px-6 rounded-xl transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg hover:shadow-xl"
+                  aria-label="Search for test"
+                >
+                  {searching ? 'Searching...' : 'Find Test'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="text-center mb-8">
+                <div className="bg-blue-100 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                </div>
+                <h2 className="text-2xl font-bold text-gray-900 mb-2">Test Found!</h2>
+                <p className="text-gray-600">Review the test details before starting</p>
+              </div>
+
+              <div className="bg-gray-50 rounded-xl p-6 mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Problem Statement *
-                    </label>
-                    <textarea
-                      value={question.problem_statement}
-                      onChange={(e) => updateQuestion(index, 'problem_statement', e.target.value)}
-                      placeholder="Enter problem statement with requirements, constraints, and examples"
-                      rows={8}
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg"
-                    />
+                    <label className="text-sm text-gray-500">Test Title</label>
+                    <p className="font-semibold text-gray-900">{testInfo.title}</p>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-500">Test Code</label>
+                    <p className="font-semibold text-gray-900 uppercase">{testInfo.test_code}</p>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-500">Questions</label>
+                    <p className="font-semibold text-gray-900">{testInfo.total_questions} questions</p>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-500">Time Limit</label>
+                    <p className="font-semibold text-gray-900">{testInfo.time_limit} minutes</p>
+                  </div>
+                  <div>
+                    <label className="text-sm text-gray-500">Created By</label>
+                    <p className="font-semibold text-gray-900">{testInfo.creator_name}</p>
+                  </div>
+                </div>
+                {testInfo.description && (
+                  <div className="mt-4">
+                    <label className="text-sm text-gray-500">Description</label>
+                    <p className="text-gray-900 mt-1">{testInfo.description}</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+                <div className="flex items-start">
+                  <svg className="w-5 h-5 text-yellow-600 mr-2 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                  </svg>
+                  <div>
+                    <h3 className="text-sm font-medium text-yellow-800">Important Instructions</h3>
+                    <ul className="text-sm text-yellow-700 mt-1 space-y-1">
+                      <li>• You have only one attempt for this test</li>
+                      <li>• The timer will start once you begin the test</li>
+                      <li>• Make sure you have a stable internet connection</li>
+                      <li>• Do not refresh the page during the test</li>
+                    </ul>
                   </div>
                 </div>
               </div>
-            ))}
 
-            <button
-              onClick={addQuestion}
-              className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-4 px-6 rounded-xl"
-            >
-              + Add Another Question
-            </button>
-          </div>
+              <div className="flex gap-4">
+                <button
+                  onClick={() => {
+                    setTestInfo(null)
+                    setTestCode('')
+                    setError('')
+                  }}
+                  className="flex-1 bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-3 px-6 rounded-lg"
+                  aria-label="Search for another test"
+                >
+                  ← Search Again
+                </button>
+                <button
+                  onClick={startTest}
+                  className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg shadow-lg hover:shadow-xl"
+                  aria-label="Start the test"
+                >
+                  Start Test →
+                </button>
+              </div>
+            </>
+          )}
+        </div>
 
-          {/* Action Buttons */}
-          <div className="flex justify-between">
-            <Link href="/create-test">
-              <button className="px-6 py-3 border border-gray-300 rounded-lg text-gray-700">
-                ← Back
-              </button>
-            </Link>
-            <button
-              onClick={saveTest}
-              disabled={saving}
-              className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg"
-            >
-              {saving ? 'Creating...' : 'Create Test'}
-            </button>
-          </div>
+        {/* Back to Home */}
+        <div className="text-center mt-8">
+          <Link href="/" className="text-indigo-600 hover:text-indigo-800 font-medium">
+            ← Back to Home
+          </Link>
         </div>
       </div>
     </div>
   )
 }
-
