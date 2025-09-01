@@ -19,6 +19,8 @@
     "@tensorflow/tfjs-converter": "^4.12.0",
     "@tensorflow/tfjs-core": "^4.12.0",
     "faceapi": "^1.0.1",
+    "lucide-react": "^0.542.0",
+    "monaco-editor": "^0.52.2",
     "next": "15.5.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",

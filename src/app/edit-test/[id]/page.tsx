@@ -6,7 +6,8 @@ import Link from 'next/link'
 import { User } from '@supabase/supabase-js'
 import { supabase } from '@/app/lib/supabase'
 
-interface Question {
+// Interface for MCQ Questions
+interface MCQQuestion {
   id: string
   question_text: string
   option_a: string
@@ -16,7 +17,28 @@ interface Question {
   correct_answer: 'A' | 'B' | 'C' | 'D'
   question_number: number
   points: number
+  isNew?: boolean // Track if this is a new question
 }
+
+// Interface for Coding Questions
+interface CodingQuestion {
+  id: string
+  title: string
+  problem_statement: string
+  points: number
+  language_id: number
+  question_number: number
+  test_cases: string // Stored as a JSON string for the textarea
+  isNew?: boolean // Track if this is a new question
+}
+
+const LANGUAGE_OPTIONS = [
+  { id: 50, name: 'C (GCC 9.2.0)' },
+  { id: 54, name: 'C++ (GCC 9.2.0)' },
+  { id: 62, name: 'Java' },
+  { id: 63, name: 'JavaScript (Node.js)' },
+  { id: 71, name: 'Python 3' }
+]
 
 export default function EditTestPage() {
   const [user, setUser] = useState<User | null>(null)
@@ -26,10 +48,16 @@ export default function EditTestPage() {
   const [testDescription, setTestDescription] = useState('')
   const [timeLimit, setTimeLimit] = useState(30)
   const [showResults, setShowResults] = useState(true)
-  const [questions, setQuestions] = useState<Question[]>([])
+  const [testType, setTestType] = useState<'mcq' | 'coding' | null>(null)
+
+  // State for different question types
+  const [mcqQuestions, setMcqQuestions] = useState<MCQQuestion[]>([])
+  const [codingQuestions, setCodingQuestions] = useState<CodingQuestion[]>([])
+  const [deletedQuestionIds, setDeletedQuestionIds] = useState<string[]>([])
+ 
   const router = useRouter()
   const params = useParams()
-  const testId = params.id
+  const testId = params.id as string
 
   const loadTestData = useCallback(async (userId: string) => {
     try {
@@ -38,148 +66,127 @@ export default function EditTestPage() {
         .select('*')
         .eq('id', testId)
         .eq('created_by', userId)
-        .single();
+        .single()
 
       if (testError || !testData) {
-        alert('Test not found or you are not authorized to edit it.');
-        router.push('/view-marks');
-        return;
+        alert('Test not found or you are not authorized to edit it.')
+        router.push('/view-marks')
+        return
       }
 
-      const { data: questionsData, error: questionsError } = await supabase
-        .from('questions')
-        .select('*')
-        .eq('test_id', testId)
-        .order('question_number');
+      setTestTitle(testData.title)
+      setTestDescription(testData.description || '')
+      setTimeLimit(testData.time_limit)
+      setShowResults(testData.show_results)
+      setTestType(testData.test_type as 'mcq' | 'coding')
 
-      if (questionsError) throw questionsError;
+      if (testData.test_type === 'coding') {
+        const { data: questionsData, error: questionsError } = await supabase
+          .from('coding_questions')
+          .select('*')
+          .eq('test_id', testId)
+          .order('question_number')
 
-      setTestTitle(testData.title);
-      setTestDescription(testData.description || '');
-      setTimeLimit(testData.time_limit);
-      setShowResults(testData.show_results);
-      
-      const processedQuestions = (questionsData || []).map((q, index) => ({
-        ...q,
-        question_number: index + 1
-      }));
-      
-      setQuestions(processedQuestions);
+        if (questionsError) throw questionsError
+       
+        const processedQuestions = (questionsData || []).map(q => ({
+            ...q,
+            test_cases: JSON.stringify(q.test_cases || [], null, 2),
+            isNew: false
+        }));
+
+        setCodingQuestions(processedQuestions)
+      } else { // MCQ - fetch from questions table with question_type = 'mcq'
+        const { data: questionsData, error: questionsError } = await supabase
+          .from('questions')
+          .select('*')
+          .eq('test_id', testId)
+          .eq('question_type', 'mcq') // Add this filter to ensure we get MCQ questions
+          .order('question_number')
+
+        if (questionsError) throw questionsError
+        const processedQuestions = (questionsData || []).map(q => ({
+          ...q,
+          isNew: false
+        }));
+        setMcqQuestions(processedQuestions)
+      }
     } catch (error) {
-      console.error('Error loading test:', error);
-      alert('Error loading test. Please try again.');
-      router.push('/view-marks');
+      console.error('Error loading test:', error)
+      alert('Error loading test. Please try again.')
+      router.push('/view-marks')
+    } finally {
+        setLoading(false)
     }
-  }, [router, testId]);
+  }, [router, testId])
 
   useEffect(() => {
     const getSession = async () => {
-      const { data: { session } } = await supabase.auth.getSession();
+      const { data: { session } } = await supabase.auth.getSession()
       if (!session?.user) {
-        router.push('/login');
-        return;
+        router.push('/login')
+        return
       }
-      setUser(session.user);
-      await loadTestData(session.user.id);
-      setLoading(false);
-    };
+      setUser(session.user)
+      if (testId) {
+        await loadTestData(session.user.id)
+      }
+    }
 
-    getSession();
+    getSession()
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (!session?.user) {
-          router.push('/login');
-        } else {
-          setUser(session.user);
-        }
+      (event, session) => {
+        if (!session?.user) router.push('/login')
+        else setUser(session.user)
       }
-    );
+    )
 
-    return () => subscription.unsubscribe();
-  }, [router, testId, loadTestData]);
+    return () => subscription.unsubscribe()
+  }, [router, testId, loadTestData])
 
-  // Helper function to renumber all questions
-  const renumberQuestions = (questionList: Question[]) => {
-    return questionList.map((q, index) => ({
-      ...q,
-      question_number: index + 1
-    }))
-  }
-
-  const addQuestion = () => {
-    const newQuestion: Question = {
-      id: `temp-${Date.now()}`,
-      question_text: '',
-      option_a: '',
-      option_b: '',
-      option_c: '',
-      option_d: '',
-      correct_answer: 'A',
-      question_number: questions.length + 1,
-      points: 1,
-    }
-    const updatedQuestions = renumberQuestions([...questions, newQuestion])
-    setQuestions(updatedQuestions)
-  }
-
-  const removeQuestion = (index: number) => {
-    if (questions.length > 1) {
-      const filteredQuestions = questions.filter((_, i) => i !== index)
-      const renumberedQuestions = renumberQuestions(filteredQuestions)
-      setQuestions(renumberedQuestions)
-    }
-  }
-
-  const updateQuestion = (index: number, field: keyof Question, value: string | number) => {
-    const updatedQuestions = [...questions]
-    updatedQuestions[index] = { 
-      ...updatedQuestions[index], 
-      [field]: value 
-    }
-    
-    // If we're updating question_number specifically, renumber all questions
-    if (field === 'question_number') {
-      const renumberedQuestions = renumberQuestions(updatedQuestions)
-      setQuestions(renumberedQuestions)
-    } else {
-      setQuestions(updatedQuestions)
-    }
-  }
-
+  // --- Generic Handlers ---
   const validateForm = () => {
     if (!testTitle.trim()) {
       alert('Please enter a test title')
       return false
     }
 
-    if (questions.some(q => 
-      !q.question_text.trim() || 
-      !q.option_a.trim() || 
-      !q.option_b.trim() || 
-      !q.option_c.trim() || 
-      !q.option_d.trim()
-    )) {
-      alert('Please fill in all question fields')
-      return false
+    if (testType === 'mcq') {
+        if (mcqQuestions.some(q => !q.question_text.trim() || !q.option_a.trim() || !q.option_b.trim() || !q.option_c.trim() || !q.option_d.trim())) {
+            alert('Please fill in all MCQ fields.')
+            return false
+        }
+    } else if (testType === 'coding') {
+        for (const [index, q] of codingQuestions.entries()) {
+            if (!q.title.trim() || !q.problem_statement.trim()) {
+                alert(`Please fill in title and problem statement for Question ${index + 1}`)
+                return false
+            }
+            try {
+                JSON.parse(q.test_cases)
+            } catch {
+                alert(`Invalid JSON in test cases for Question ${index + 1}`)
+                return false
+            }
+        }
     }
-
     return true
   }
 
   const saveTest = async () => {
-    if (!validateForm() || !user) return
+    if (!validateForm() || !user || !testType) return
 
     setSaving(true)
     try {
-      // Update test
+      // Update test details
       const { error: testError } = await supabase
         .from('tests')
         .update({
           title: testTitle.trim(),
           description: testDescription.trim() || null,
           time_limit: timeLimit,
-          total_questions: questions.length,
+          total_questions: testType === 'mcq' ? mcqQuestions.length : codingQuestions.length,
           show_results: showResults,
           updated_at: new Date().toISOString(),
         })
@@ -188,33 +195,90 @@ export default function EditTestPage() {
 
       if (testError) throw testError
 
-      // Delete existing questions
-      const { error: deleteError } = await supabase
-        .from('questions')
-        .delete()
-        .eq('test_id', testId)
+      // Handle questions based on type with proper update/insert logic
+      if (testType === 'mcq') {
+        // Delete removed questions
+        if (deletedQuestionIds.length > 0) {
+          const { error: deleteError } = await supabase
+            .from('questions')
+            .delete()
+            .in('id', deletedQuestionIds)
+          if (deleteError) throw deleteError
+        }
 
-      if (deleteError) throw deleteError
+        // Process existing and new questions
+        for (const [index, q] of mcqQuestions.entries()) {
+          const questionData = {
+            test_id: testId,
+            question_text: q.question_text.trim(),
+            option_a: q.option_a.trim(),
+            option_b: q.option_b.trim(),
+            option_c: q.option_c.trim(),
+            option_d: q.option_d.trim(),
+            correct_answer: q.correct_answer,
+            question_number: index + 1,
+            points: q.points,
+            question_type: 'mcq'
+          }
 
-      // Insert updated questions with proper numbering
-      const questionsToInsert = questions.map((question, index) => ({
-        test_id: testId,
-        question_text: question.question_text.trim(),
-        option_a: question.option_a.trim(),
-        option_b: question.option_b.trim(),
-        option_c: question.option_c.trim(),
-        option_d: question.option_d.trim(),
-        correct_answer: question.correct_answer,
-        question_number: index + 1, // Ensure sequential numbering
-        points: question.points,
-      }))
+          if (q.isNew || q.id.startsWith('temp-')) {
+            // Insert new question
+            const { error: insertError } = await supabase
+              .from('questions')
+              .insert(questionData)
+            if (insertError) throw insertError
+          } else {
+            // Update existing question
+            const { error: updateError } = await supabase
+              .from('questions')
+              .update(questionData)
+              .eq('id', q.id)
+            if (updateError) throw updateError
+          }
+        }
+      } else if (testType === 'coding') {
+        // Delete removed questions
+        if (deletedQuestionIds.length > 0) {
+          const { error: deleteError } = await supabase
+            .from('coding_questions')
+            .delete()
+            .in('id', deletedQuestionIds)
+          if (deleteError) throw deleteError
+        }
 
-      const { error: questionsError } = await supabase
-        .from('questions')
-        .insert(questionsToInsert)
+        // Process existing and new questions
+        for (const [index, q] of codingQuestions.entries()) {
+          const questionData = {
+            test_id: testId,
+            title: q.title.trim(),
+            problem_statement: q.problem_statement.trim(),
+            language_id: q.language_id,
+            points: q.points,
+            created_by: user.id,
+            question_number: index + 1,
+            test_cases: JSON.parse(q.test_cases),
+          }
 
-      if (questionsError) throw questionsError
+          if (q.isNew || q.id.startsWith('temp-')) {
+            // Insert new question
+            const { error: insertError } = await supabase
+              .from('coding_questions')
+              .insert(questionData)
+            if (insertError) throw insertError
+          } else {
+            // Update existing question
+            const { error: updateError } = await supabase
+              .from('coding_questions')
+              .update(questionData)
+              .eq('id', q.id)
+            if (updateError) throw updateError
+          }
+        }
+      }
 
+      // Reset deleted questions tracking
+      setDeletedQuestionIds([])
+      
       alert('Test updated successfully!')
       router.push('/view-marks')
     } catch (error) {
@@ -225,12 +289,78 @@ export default function EditTestPage() {
     }
   }
 
+  // --- MCQ Handlers ---
+  const addMCQQuestion = () => {
+    const newQuestion: MCQQuestion = {
+      id: `temp-${Date.now()}`,
+      question_text: '',
+      option_a: '',
+      option_b: '',
+      option_c: '',
+      option_d: '',
+      correct_answer: 'A',
+      question_number: mcqQuestions.length + 1,
+      points: 1,
+      isNew: true
+    }
+    setMcqQuestions([...mcqQuestions, newQuestion])
+  }
+
+  const removeMCQQuestion = (index: number) => {
+    if (mcqQuestions.length > 1) {
+      const questionToRemove = mcqQuestions[index]
+      
+      // If it's not a new question, add it to deleted list
+      if (!questionToRemove.isNew && !questionToRemove.id.startsWith('temp-')) {
+        setDeletedQuestionIds(prev => [...prev, questionToRemove.id])
+      }
+      
+      setMcqQuestions(mcqQuestions.filter((_, i) => i !== index))
+    }
+  }
+
+  const updateMCQQuestion = (index: number, field: keyof MCQQuestion, value: string | number) => {
+    const updated = [...mcqQuestions]
+    updated[index] = { ...updated[index], [field]: value }
+    setMcqQuestions(updated)
+  }
+
+  // --- Coding Handlers ---
+  const addCodingQuestion = () => {
+    const newQuestion: CodingQuestion = {
+      id: `temp-${Date.now()}`,
+      title: '',
+      problem_statement: '',
+      points: 5,
+      language_id: 63,
+      question_number: codingQuestions.length + 1,
+      test_cases: '[]',
+      isNew: true
+    }
+    setCodingQuestions([...codingQuestions, newQuestion])
+  }
+
+  const removeCodingQuestion = (index: number) => {
+    if (codingQuestions.length > 1) {
+      const questionToRemove = codingQuestions[index]
+      
+      // If it's not a new question, add it to deleted list
+      if (!questionToRemove.isNew && !questionToRemove.id.startsWith('temp-')) {
+        setDeletedQuestionIds(prev => [...prev, questionToRemove.id])
+      }
+      
+      setCodingQuestions(codingQuestions.filter((_, i) => i !== index))
+    }
+  }
+
+  const updateCodingQuestion = (index: number, field: keyof CodingQuestion, value: string | number) => {
+    const updated = [...codingQuestions]
+    updated[index] = { ...updated[index], [field]: value }
+    setCodingQuestions(updated)
+  }
+
   if (loading) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 flex items-center justify-center">
-        <div className="text-xl text-gray-600">Loading...</div>
-      </div>
-    )
+    return <div className="min-h-screen flex items-center justify-center">Loading...</div>
   }
 
   return (
@@ -238,223 +368,135 @@ export default function EditTestPage() {
       <div className="bg-white shadow-lg">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
-            <Link href="/" className="text-2xl font-bold text-indigo-600 hover:text-indigo-700">
-              Invigilo
-            </Link>
+            <Link href="/" className="text-2xl font-bold text-indigo-600">Invigilo</Link>
             <div className="flex items-center space-x-4">
-              <span className="text-gray-700">
-                Welcome, {user?.user_metadata?.full_name || user?.email}
-              </span>
-              <button
-                onClick={() => supabase.auth.signOut()}
-                className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg"
-              >
-                Sign Out
-              </button>
+              <span className="text-gray-700">Welcome, {user?.user_metadata?.full_name || user?.email}</span>
+              <button onClick={() => supabase.auth.signOut()} className="bg-gray-600 hover:bg-gray-700 text-white px-4 py-2 rounded-lg">Sign Out</button>
             </div>
           </div>
         </div>
       </div>
 
       <div className="max-w-4xl mx-auto px-4 py-8">
-        <div className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900 mb-2">Edit Test</h1>
-          <p className="text-gray-600">Modify your test details and questions</p>
-        </div>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">Edit {testType?.toUpperCase()} Test</h1>
+        <p className="text-gray-600 mb-8">Modify your test details and questions</p>
 
         <div className="bg-white rounded-2xl shadow-xl p-8">
+          {/* Test Information */}
           <div className="mb-8">
             <h2 className="text-xl font-semibold text-gray-900 mb-6">Test Information</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Test Title *
-                </label>
-                <input
-                  type="text"
-                  value={testTitle}
-                  onChange={(e) => setTestTitle(e.target.value)}
-                  placeholder="Enter test title"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Time Limit (minutes)
-                </label>
-                <input
-                  type="number"
-                  value={timeLimit}
-                  onChange={(e) => setTimeLimit(Number(e.target.value))}
-                  min="1"
-                  max="180"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                />
-              </div>
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Test Title *</label>
+                    <input type="text" value={testTitle} onChange={(e) => setTestTitle(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg bg-white text-gray-900" />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Time Limit (minutes)</label>
+                    <input type="number" value={timeLimit} onChange={(e) => setTimeLimit(Number(e.target.value))} min="1" max="180" className="w-full p-2 border border-gray-300 rounded-lg bg-white text-gray-900" />
+                </div>
             </div>
             <div className="mt-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Description
-              </label>
-              <textarea
-                value={testDescription}
-                onChange={(e) => setTestDescription(e.target.value)}
-                placeholder="Enter test description (optional)"
-                rows={3}
-                className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-              />
+                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                <textarea value={testDescription} onChange={(e) => setTestDescription(e.target.value)} rows={3} className="w-full p-2 border border-gray-300 rounded-lg bg-white text-gray-900" />
             </div>
             <div className="mt-4">
               <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={showResults}
-                  onChange={(e) => setShowResults(e.target.checked)}
-                  className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                />
-                <span className="ml-2 text-sm text-gray-700">
-                  Show results to students after submission
-                </span>
+                <input type="checkbox" checked={showResults} onChange={(e) => setShowResults(e.target.checked)} className="h-4 w-4 text-blue-600 rounded" />
+                <span className="ml-2 text-sm text-gray-700">Show results to students after submission</span>
               </label>
             </div>
           </div>
 
-          <div className="mb-8">
-            <h2 className="text-xl font-semibold text-gray-900 mb-6">Questions ({questions.length})</h2>
-            {questions.map((question, index) => (
-              <div key={`question-${index}-${question.id}`} className="bg-gray-50 rounded-xl p-6 mb-6">
-                <div className="flex justify-between items-center mb-4">
-                  <h3 className="text-lg font-medium text-gray-900">Question {index + 1}</h3>
-                  {questions.length > 1 && (
-                    <button
-                      onClick={() => removeQuestion(index)}
-                      className="text-red-600 hover:text-red-800 p-2 rounded-lg hover:bg-red-50"
-                    >
-                      <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                        <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
-                      </svg>
-                    </button>
-                  )}
-                </div>
-                <div className="space-y-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-2">
-                      Question Text *
-                    </label>
-                    <textarea
-                      value={question.question_text}
-                      onChange={(e) => updateQuestion(index, 'question_text', e.target.value)}
-                      placeholder="Enter your question"
-                      rows={3}
-                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                    />
+          {/* Conditional Question Editor */}
+          {testType === 'mcq' && (
+            <div id="mcq-editor">
+              <h2 className="text-xl font-semibold text-gray-900 mb-6">MCQ Questions ({mcqQuestions.length})</h2>
+              {mcqQuestions.map((q, index) => (
+                <div key={q.id} className="bg-gray-50 rounded-xl p-6 mb-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-medium">
+                      Question {index + 1} 
+                      {q.isNew && <span className="text-green-600 text-sm ml-2">(New)</span>}
+                    </h3>
+                    <button onClick={() => removeMCQQuestion(index)} className="text-red-600 hover:text-red-800">Remove</button>
                   </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Option A *
-                      </label>
-                      <input
-                        type="text"
-                        value={question.option_a}
-                        onChange={(e) => updateQuestion(index, 'option_a', e.target.value)}
-                        placeholder="Option A"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      />
+                  <div className="space-y-4">
+                    <textarea value={q.question_text} onChange={(e) => updateMCQQuestion(index, 'question_text', e.target.value)} placeholder="Question Text" rows={3} className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <input type="text" value={q.option_a} onChange={(e) => updateMCQQuestion(index, 'option_a', e.target.value)} placeholder="Option A" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                        <input type="text" value={q.option_b} onChange={(e) => updateMCQQuestion(index, 'option_b', e.target.value)} placeholder="Option B" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                        <input type="text" value={q.option_c} onChange={(e) => updateMCQQuestion(index, 'option_c', e.target.value)} placeholder="Option C" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                        <input type="text" value={q.option_d} onChange={(e) => updateMCQQuestion(index, 'option_d', e.target.value)} placeholder="Option D" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
                     </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Option B *
-                      </label>
-                      <input
-                        type="text"
-                        value={question.option_b}
-                        onChange={(e) => updateQuestion(index, 'option_b', e.target.value)}
-                        placeholder="Option B"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Option C *
-                      </label>
-                      <input
-                        type="text"
-                        value={question.option_c}
-                        onChange={(e) => updateQuestion(index, 'option_c', e.target.value)}
-                        placeholder="Option C"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Option D *
-                      </label>
-                      <input
-                        type="text"
-                        value={question.option_d}
-                        onChange={(e) => updateQuestion(index, 'option_d', e.target.value)}
-                        placeholder="Option D"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Correct Answer *
-                      </label>
-                      <select
-                        value={question.correct_answer}
-                        onChange={(e) => updateQuestion(index, 'correct_answer', e.target.value as 'A' | 'B' | 'C' | 'D')}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      >
-                        <option value="A">A</option>
-                        <option value="B">B</option>
-                        <option value="C">C</option>
-                        <option value="D">D</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">
-                        Points
-                      </label>
-                      <input
-                        type="number"
-                        value={question.points}
-                        onChange={(e) => updateQuestion(index, 'points', Number(e.target.value))}
-                        min="1"
-                        max="10"
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-gray-900"
-                      />
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Correct Answer</label>
+                          <select value={q.correct_answer} onChange={(e) => updateMCQQuestion(index, 'correct_answer', e.target.value as 'A' | 'B' | 'C' | 'D')} className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900">
+                              <option value="A">A</option><option value="B">B</option><option value="C">C</option><option value="D">D</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-sm font-medium text-gray-700 mb-1">Points</label>
+                          <input type="number" value={q.points} onChange={(e) => updateMCQQuestion(index, 'points', Number(e.target.value))} min="1" max="10" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                        </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
-            <button
-              onClick={addQuestion}
-              className="w-full bg-gray-100 hover:bg-gray-200 text-gray-700 font-medium py-4 px-6 rounded-xl border-2 border-dashed border-gray-300 hover:border-gray-400"
-            >
-              + Add Another Question
-            </button>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-4 justify-between">
-            <Link href="/view-marks">
-              <button className="px-6 py-3 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
-                ← Back
-              </button>
-            </Link>
-            <div className="flex gap-4">
-              <button
-                onClick={saveTest}
-                disabled={saving}
-                className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {saving ? 'Saving...' : 'Save Changes'}
-              </button>
+              ))}
+              <button onClick={addMCQQuestion} className="w-full bg-gray-100 hover:bg-gray-200 p-4 rounded-xl border-2 border-dashed border-gray-300 text-gray-600 font-medium">+ Add MCQ Question</button>
             </div>
+          )}
+
+          {testType === 'coding' && (
+            <div id="coding-editor">
+              <h2 className="text-xl font-semibold text-gray-900 mb-6">Coding Questions ({codingQuestions.length})</h2>
+              {codingQuestions.map((q, index) => (
+                <div key={q.id} className="bg-gray-50 rounded-xl p-6 mb-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h3 className="text-lg font-medium">
+                      Question {index + 1}
+                      {q.isNew && <span className="text-green-600 text-sm ml-2">(New)</span>}
+                    </h3>
+                    <button onClick={() => removeCodingQuestion(index)} className="text-red-600 hover:text-red-800">Remove</button>
+                  </div>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Question Title</label>
+                        <input type="text" value={q.title} onChange={(e) => updateCodingQuestion(index, 'title', e.target.value)} placeholder="Question Title" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Programming Language</label>
+                        <select value={q.language_id} onChange={(e) => updateCodingQuestion(index, 'language_id', Number(e.target.value))} className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900">
+                            {LANGUAGE_OPTIONS.map(lang => (<option key={lang.id} value={lang.id}>{lang.name}</option>))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Problem Statement</label>
+                        <textarea value={q.problem_statement} onChange={(e) => updateCodingQuestion(index, 'problem_statement', e.target.value)} placeholder="Problem Statement" rows={8} className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Test Cases (JSON Format)</label>
+                        <textarea value={q.test_cases} onChange={(e) => updateCodingQuestion(index, 'test_cases', e.target.value)} placeholder='[{"input": "5", "expected_output": "5"}]' rows={4} className="w-full p-2 border border-gray-300 rounded font-mono text-sm bg-white text-gray-900" />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">Points</label>
+                        <input type="number" value={q.points} onChange={(e) => updateCodingQuestion(index, 'points', Number(e.target.value))} min="1" max="20" className="w-full p-2 border border-gray-300 rounded bg-white text-gray-900" />
+                      </div>
+                    </div>
+                </div>
+              ))}
+              <button onClick={addCodingQuestion} className="w-full bg-gray-100 hover:bg-gray-200 p-4 rounded-xl border-2 border-dashed border-gray-300 text-gray-600 font-medium">+ Add Coding Question</button>
+            </div>
+          )}
+
+          {/* Action Buttons */}
+          <div className="flex justify-between mt-8">
+            <Link href="/view-marks">
+                <button className="px-6 py-3 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50">← Back</button>
+            </Link>
+            <button onClick={saveTest} disabled={saving} className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg disabled:bg-blue-300">
+                {saving ? 'Saving...' : 'Save Changes'}
+            </button>
           </div>
         </div>
       </div>

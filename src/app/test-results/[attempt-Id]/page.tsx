@@ -6,7 +6,8 @@ import Link from 'next/link'
 import { User } from '@supabase/supabase-js'
 import { supabase } from '@/app/lib/supabase'
 
-interface Question {
+// Interface for MCQ Questions
+interface MCQQuestion {
   id: string
   question_text: string
   option_a: string
@@ -18,12 +19,79 @@ interface Question {
   points: number
 }
 
+// Interface for Coding Questions
+interface CodingQuestion {
+  id: string
+  title: string
+  problem_statement: string
+  points: number
+  language_id: number
+  question_number: number
+}
+
+// Database response interfaces
+interface MCQQuestionFromDB {
+  id: string
+  question_text: string
+  option_a: string
+  option_b: string
+  option_c: string
+  option_d: string
+  correct_answer: 'A' | 'B' | 'C' | 'D'
+  question_number: number
+  points: number
+  test_id: string
+  question_type: string
+}
+
+interface CodingQuestionFromDB {
+  id: string
+  title: string
+  problem_statement: string
+  points: number
+  language_id: number
+  question_number: number
+  test_id: string
+}
+
+interface UserAnswerFromDB {
+  id: string
+  question_id: string
+  selected_answer: 'A' | 'B' | 'C' | 'D' | null
+  is_correct: boolean
+  points_earned: number
+  attempt_id: string
+}
+
+interface UserCodingAnswerFromDB {
+  id: string
+  question_id: string
+  code_submission: string | null
+  compilation_status: string | null
+  execution_time: number | null
+  memory_used: number | null
+  points_earned: number
+  ai_feedback: string | null
+  attempt_id: string
+}
+
 interface UserAnswer {
   id: string
   question_id: string
   selected_answer: 'A' | 'B' | 'C' | 'D' | null
   is_correct: boolean
   points_earned: number
+}
+
+interface UserCodingAnswer {
+  id: string
+  question_id: string
+  code_submission: string | null
+  compilation_status: string | null
+  execution_time: number | null
+  memory_used: number | null
+  points_earned: number
+  ai_feedback: string | null
 }
 
 interface TestAttempt {
@@ -43,17 +111,27 @@ interface TestAttempt {
     time_limit: number
     show_results: boolean
     created_by: string
+    test_type: 'mcq' | 'coding'
     created_by_name?: string
   }
 }
 
 interface DetailedResult {
-  question: Question
-  userAnswer: UserAnswer | null
+  question: MCQQuestion | CodingQuestion
+  userAnswer: UserAnswer | UserCodingAnswer | null
   isCorrect: boolean
   pointsEarned: number
   totalPoints: number
+  questionType: 'mcq' | 'coding'
 }
+
+const LANGUAGE_OPTIONS = [
+  { id: 50, name: 'C (GCC 9.2.0)' },
+  { id: 54, name: 'C++ (GCC 9.2.0)' },
+  { id: 62, name: 'Java' },
+  { id: 63, name: 'JavaScript (Node.js)' },
+  { id: 71, name: 'Python 3' }
+]
 
 export default function TestResultsPage() {
   const [user, setUser] = useState<User | null>(null)
@@ -65,12 +143,9 @@ export default function TestResultsPage() {
   const router = useRouter()
   const params = useParams()
   
-  // Extract attemptId from params with proper type checking
-  // Note: The file is named [attempt-Id] so we access it with the hyphen
   const attemptId = Array.isArray(params['attempt-Id']) ? params['attempt-Id'][0] : params['attempt-Id']
 
   useEffect(() => {
-    // Add validation for attemptId
     if (!attemptId) {
       setError('No attempt ID provided')
       setLoading(false)
@@ -107,9 +182,9 @@ export default function TestResultsPage() {
 
   const loadTestResults = async (userId: string, attemptId: string) => {
     try {
-      console.log('Loading results for attemptId:', attemptId, 'userId:', userId) // Debug log
+      console.log('Loading results for attemptId:', attemptId, 'userId:', userId)
       
-      // Load test attempt details
+      // Load test attempt details with test type
       const { data: attemptData, error: attemptError } = await supabase
         .from('test_attempts')
         .select(`
@@ -122,6 +197,7 @@ export default function TestResultsPage() {
             time_limit,
             show_results,
             created_by,
+            test_type,
             profiles!tests_created_by_fkey (
               full_name
             )
@@ -153,47 +229,134 @@ export default function TestResultsPage() {
       }
       setAttempt(transformedAttempt)
 
-      // Load questions for this test
-      const { data: questionsData, error: questionsError } = await supabase
-        .from('questions')
-        .select('*')
-        .eq('test_id', attemptData.test_id)
-        .order('question_number', { ascending: true })
+      // Load questions based on test type
+      let questionsData: (MCQQuestionFromDB | CodingQuestionFromDB)[] = []
+      const testType = attemptData.tests.test_type
 
-      if (questionsError) {
-        console.error('Questions error:', questionsError)
-        throw questionsError
+      if (testType === 'coding') {
+        const { data: codingQuestionsData, error: questionsError } = await supabase
+          .from('coding_questions')
+          .select('*')
+          .eq('test_id', attemptData.test_id)
+          .order('question_number', { ascending: true })
+
+        if (questionsError) {
+          console.error('Coding questions error:', questionsError)
+          throw questionsError
+        }
+        questionsData = (codingQuestionsData || []) as CodingQuestionFromDB[]
+      } else {
+        const { data: mcqQuestionsData, error: questionsError } = await supabase
+          .from('questions')
+          .select('*')
+          .eq('test_id', attemptData.test_id)
+          .eq('question_type', 'mcq')
+          .order('question_number', { ascending: true })
+
+        if (questionsError) {
+          console.error('MCQ questions error:', questionsError)
+          throw questionsError
+        }
+        questionsData = (mcqQuestionsData || []) as MCQQuestionFromDB[]
       }
 
-      // Load user answers for this attempt
-      const { data: answersData, error: answersError } = await supabase
-        .from('user_answers')
-        .select('*')
-        .eq('attempt_id', attemptId)
+      // Load user answers based on test type
+      let answersData: (UserAnswerFromDB | UserCodingAnswerFromDB)[] = []
+      
+      if (testType === 'coding') {
+        const { data: codingAnswersData, error: answersError } = await supabase
+          .from('user_coding_answers')
+          .select('*')
+          .eq('attempt_id', attemptId)
 
-      if (answersError) {
-        console.error('Answers error:', answersError)
-        throw answersError
+        if (answersError) {
+          console.error('Coding answers error:', answersError)
+          throw answersError
+        }
+        answersData = (codingAnswersData || []) as UserCodingAnswerFromDB[]
+      } else {
+        const { data: mcqAnswersData, error: answersError } = await supabase
+          .from('user_answers')
+          .select('*')
+          .eq('attempt_id', attemptId)
+
+        if (answersError) {
+          console.error('MCQ answers error:', answersError)
+          throw answersError
+        }
+        answersData = (mcqAnswersData || []) as UserAnswerFromDB[]
       }
 
       // Combine questions with user answers
-      const detailedResults: DetailedResult[] = (questionsData || []).map((question: Question) => {
-        const userAnswer = (answersData || []).find((answer: UserAnswer) => answer.question_id === question.id)
+      const detailedResults: DetailedResult[] = questionsData.map((question) => {
+        const userAnswer = (answersData || []).find((answer) => answer.question_id === question.id)
         
         let isCorrect = false
         let pointsEarned = 0
 
         if (userAnswer) {
-          isCorrect = userAnswer.is_correct
+          // For coding questions, determine if correct based on compilation_status
+          if (testType === 'coding') {
+            const codingAnswer = userAnswer as UserCodingAnswerFromDB
+            isCorrect = codingAnswer.compilation_status === 'Accepted' || 
+                       codingAnswer.compilation_status === 'Correct'
+          } else {
+            const mcqAnswer = userAnswer as UserAnswerFromDB
+            isCorrect = mcqAnswer.is_correct
+          }
           pointsEarned = userAnswer.points_earned
         }
 
+        // Transform the question and answer to remove DB-specific fields
+        const transformedQuestion: MCQQuestion | CodingQuestion = testType === 'coding' 
+          ? {
+              id: question.id,
+              title: (question as CodingQuestionFromDB).title,
+              problem_statement: (question as CodingQuestionFromDB).problem_statement,
+              points: question.points,
+              language_id: (question as CodingQuestionFromDB).language_id,
+              question_number: question.question_number
+            }
+          : {
+              id: question.id,
+              question_text: (question as MCQQuestionFromDB).question_text,
+              option_a: (question as MCQQuestionFromDB).option_a,
+              option_b: (question as MCQQuestionFromDB).option_b,
+              option_c: (question as MCQQuestionFromDB).option_c,
+              option_d: (question as MCQQuestionFromDB).option_d,
+              correct_answer: (question as MCQQuestionFromDB).correct_answer,
+              question_number: question.question_number,
+              points: question.points
+            }
+
+        const transformedAnswer: UserAnswer | UserCodingAnswer | null = userAnswer
+          ? testType === 'coding'
+            ? {
+                id: userAnswer.id,
+                question_id: userAnswer.question_id,
+                code_submission: (userAnswer as UserCodingAnswerFromDB).code_submission,
+                compilation_status: (userAnswer as UserCodingAnswerFromDB).compilation_status,
+                execution_time: (userAnswer as UserCodingAnswerFromDB).execution_time,
+                memory_used: (userAnswer as UserCodingAnswerFromDB).memory_used,
+                points_earned: userAnswer.points_earned,
+                ai_feedback: (userAnswer as UserCodingAnswerFromDB).ai_feedback
+              }
+            : {
+                id: userAnswer.id,
+                question_id: userAnswer.question_id,
+                selected_answer: (userAnswer as UserAnswerFromDB).selected_answer,
+                is_correct: (userAnswer as UserAnswerFromDB).is_correct,
+                points_earned: userAnswer.points_earned
+              }
+          : null
+
         return {
-          question,
-          userAnswer: userAnswer || null,
+          question: transformedQuestion,
+          userAnswer: transformedAnswer,
           isCorrect,
           pointsEarned,
-          totalPoints: question.points
+          totalPoints: question.points,
+          questionType: testType
         }
       })
 
@@ -201,7 +364,6 @@ export default function TestResultsPage() {
       
     } catch (error) {
       console.error('Error loading test results:', error)
-      // More detailed error logging
       if (error && typeof error === 'object' && 'message' in error) {
         setError(`Failed to load test results: ${error.message}`)
       } else {
@@ -227,7 +389,7 @@ export default function TestResultsPage() {
     return ((score / totalPoints) * 100).toFixed(1)
   }
 
-  const getOptionText = (question: Question, optionLetter: 'A' | 'B' | 'C' | 'D') => {
+  const getOptionText = (question: MCQQuestion, optionLetter: 'A' | 'B' | 'C' | 'D') => {
     switch (optionLetter) {
       case 'A': return question.option_a
       case 'B': return question.option_b
@@ -247,6 +409,11 @@ export default function TestResultsPage() {
     } else {
       return 'bg-gray-50 border-gray-200 text-gray-700'
     }
+  }
+
+  const getLanguageName = (languageId: number) => {
+    const language = LANGUAGE_OPTIONS.find(lang => lang.id === languageId)
+    return language ? language.name : 'Unknown'
   }
 
   if (loading) {
@@ -290,6 +457,7 @@ export default function TestResultsPage() {
   const correctAnswers = results.filter(r => r.isCorrect).length
   const totalQuestions = results.length
   const totalPossiblePoints = results.reduce((sum, r) => sum + r.totalPoints, 0)
+  const actualPointsEarned = results.reduce((sum, r) => sum + r.pointsEarned, 0)
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50">
@@ -328,20 +496,25 @@ export default function TestResultsPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="text-center">
               <div className="text-3xl font-bold text-indigo-600">
-                {attempt.score}
+                {actualPointsEarned}
               </div>
               <div className="text-sm text-gray-600">Total Score</div>
               <div className="text-xs text-gray-500">out of {totalPossiblePoints} points</div>
+              {actualPointsEarned !== attempt.score && (
+                <div className="text-xs text-red-500 mt-1">
+                  (DB shows {attempt.score} - inconsistent)
+                </div>
+              )}
             </div>
             <div className="text-center">
               <div className={`text-3xl font-bold ${
-                parseFloat(calculatePercentage(attempt.score, totalPossiblePoints)) >= 70
+                parseFloat(calculatePercentage(actualPointsEarned, totalPossiblePoints)) >= 70
                   ? 'text-green-600'
-                  : parseFloat(calculatePercentage(attempt.score, totalPossiblePoints)) >= 50
+                  : parseFloat(calculatePercentage(actualPointsEarned, totalPossiblePoints)) >= 50
                   ? 'text-yellow-600'
                   : 'text-red-600'
               }`}>
-                {calculatePercentage(attempt.score, totalPossiblePoints)}%
+                {calculatePercentage(actualPointsEarned, totalPossiblePoints)}%
               </div>
               <div className="text-sm text-gray-600">Percentage</div>
             </div>
@@ -363,7 +536,7 @@ export default function TestResultsPage() {
           <div className="mt-6 text-center">
             <h1 className="text-2xl font-bold text-gray-900">{attempt.test.title}</h1>
             <p className="text-gray-600 mt-1">
-              Test Code: {attempt.test.test_code} | Created by: {attempt.test.created_by_name}
+              Test Code: {attempt.test.test_code} | Type: {attempt.test.test_type.toUpperCase()} | Created by: {attempt.test.created_by_name}
             </p>
             <p className="text-sm text-gray-500 mt-2">
               Completed on {attempt.completed_at ? formatDate(attempt.completed_at) : 'In Progress'}
@@ -416,9 +589,17 @@ export default function TestResultsPage() {
                       }`}>
                         {currentResult.isCorrect ? 'Correct' : 'Incorrect'}
                       </span>
+                      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                        {currentResult.questionType.toUpperCase()}
+                      </span>
                       <span className="text-sm text-gray-600">
                         Points: {currentResult.pointsEarned} / {currentResult.totalPoints}
                       </span>
+                      {currentResult.questionType === 'coding' && 'language_id' in currentResult.question && (
+                        <span className="text-sm text-gray-600">
+                          Language: {getLanguageName(currentResult.question.language_id)}
+                        </span>
+                      )}
                     </div>
                   </div>
                   
@@ -440,90 +621,171 @@ export default function TestResultsPage() {
                   </div>
                 </div>
 
-                {/* Question Text */}
-                <div className="mb-6">
-                  <div className="text-lg text-gray-900 mb-4">
-                    {currentResult.question.question_text}
-                  </div>
-                </div>
+                {/* Question Content - Different for MCQ vs Coding */}
+                {currentResult.questionType === 'mcq' ? (
+                  // MCQ Question Display
+                  <>
+                    <div className="mb-6">
+                      <div className="text-lg text-gray-900 mb-4">
+                        {'question_text' in currentResult.question && currentResult.question.question_text}
+                      </div>
+                    </div>
 
-                {/* Answer Options */}
-                <div className="space-y-3 mb-6">
-                  <h4 className="text-md font-semibold text-gray-700">Answer Options:</h4>
-                  {(['A', 'B', 'C', 'D'] as const).map((optionLetter) => {
-                    const optionText = getOptionText(currentResult.question, optionLetter)
-                    const isCorrectAnswer = optionLetter === currentResult.question.correct_answer
-                    const isSelectedAnswer = currentResult.userAnswer?.selected_answer === optionLetter
-                    
-                    return (
-                      <div
-                        key={optionLetter}
-                        className={`p-4 rounded-lg border-2 ${getAnswerStyle(isCorrectAnswer, isSelectedAnswer)}`}
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            {optionLetter}. {optionText}
-                          </span>
-                          <div className="flex space-x-2">
-                            {isCorrectAnswer && (
-                              <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                                Correct Answer
+                    {/* Answer Options */}
+                    <div className="space-y-3 mb-6">
+                      <h4 className="text-md font-semibold text-gray-700">Answer Options:</h4>
+                      {(['A', 'B', 'C', 'D'] as const).map((optionLetter) => {
+                        const mcqQuestion = currentResult.question as MCQQuestion
+                        const mcqAnswer = currentResult.userAnswer as UserAnswer
+                        const optionText = getOptionText(mcqQuestion, optionLetter)
+                        const isCorrectAnswer = optionLetter === mcqQuestion.correct_answer
+                        const isSelectedAnswer = mcqAnswer?.selected_answer === optionLetter
+                        
+                        return (
+                          <div
+                            key={optionLetter}
+                            className={`p-4 rounded-lg border-2 ${getAnswerStyle(isCorrectAnswer, isSelectedAnswer)}`}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm font-medium">
+                                {optionLetter}. {optionText}
                               </span>
+                              <div className="flex space-x-2">
+                                {isCorrectAnswer && (
+                                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                                    Correct Answer
+                                  </span>
+                                )}
+                                {isSelectedAnswer && (
+                                  <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                    isCorrectAnswer 
+                                      ? 'bg-green-100 text-green-800' 
+                                      : 'bg-red-100 text-red-800'
+                                  }`}>
+                                    Your Answer
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+
+                    {/* MCQ Answer Summary */}
+                    <div className="border-t pt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Your Answer:</h4>
+                          <p className={`text-sm font-medium ${
+                            !currentResult.userAnswer || (currentResult.questionType === 'mcq' && !(currentResult.userAnswer as UserAnswer).selected_answer)
+                              ? 'text-gray-500 italic' 
+                              : currentResult.isCorrect 
+                              ? 'text-green-600' 
+                              : 'text-red-600'
+                          }`}>
+                            {currentResult.questionType === 'mcq' && currentResult.userAnswer && (currentResult.userAnswer as UserAnswer).selected_answer
+                              ? `${(currentResult.userAnswer as UserAnswer).selected_answer}. ${getOptionText(currentResult.question as MCQQuestion, (currentResult.userAnswer as UserAnswer).selected_answer!)}`
+                              : 'No answer provided - Auto submitted due to fullscreen exit or tab switch'
+                            }
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Correct Answer:</h4>
+                          <p className="text-sm text-green-600 font-medium">
+                            {(currentResult.question as MCQQuestion).correct_answer}. {getOptionText(currentResult.question as MCQQuestion, (currentResult.question as MCQQuestion).correct_answer)}
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Result:</h4>
+                          <p className={`text-sm font-medium ${
+                            currentResult.isCorrect ? 'text-green-600' : 'text-red-600'
+                          }`}>
+                            {currentResult.isCorrect ? 'Correct ✓' : 'Incorrect ✗'} 
+                            <br />
+                            <span className="text-xs text-gray-600">
+                              {currentResult.pointsEarned}/{currentResult.totalPoints} points
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  // Coding Question Display
+                  <>
+                    <div className="mb-6">
+                      <div className="text-lg font-semibold text-gray-900 mb-2">
+                        {'title' in currentResult.question && currentResult.question.title}
+                      </div>
+                      <div className="text-gray-700 whitespace-pre-wrap">
+                        {'problem_statement' in currentResult.question && currentResult.question.problem_statement}
+                      </div>
+                    </div>
+
+                    {/* Coding Result Summary */}
+                    <div className="border-t pt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Submission Status:</h4>
+                          <p className={`text-sm font-medium ${
+                            currentResult.isCorrect ? 'text-green-600' : 'text-red-600'
+                          }`}>
+                            {currentResult.isCorrect ? 'Solution Accepted ✓' : 'Solution Failed ✗'}
+                          </p>
+                          <p className="text-xs text-gray-600 mt-1">
+                            {currentResult.pointsEarned}/{currentResult.totalPoints} points earned
+                          </p>
+                          {currentResult.userAnswer && 'code_submission' in currentResult.userAnswer && (
+                            <details className="mt-2">
+                              <summary className="text-xs text-blue-600 cursor-pointer hover:text-blue-800">
+                                View Submitted Code
+                              </summary>
+                              <pre className="mt-2 p-3 bg-gray-900 text-gray-100 rounded text-xs overflow-x-auto">
+                                <code>{(currentResult.userAnswer as UserCodingAnswer).code_submission || 'No code submitted'}</code>
+                              </pre>
+                            </details>
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-700 mb-2">Programming Language:</h4>
+                          <p className="text-sm text-gray-700">
+                            {'language_id' in currentResult.question && getLanguageName(currentResult.question.language_id)}
+                          </p>
+                          <div>
+                            <h5 className="text-xs font-medium text-gray-600">Compilation Status:</h5>
+                            <p className={`text-sm font-medium ${
+                              (currentResult.userAnswer as UserCodingAnswer).compilation_status === 'Accepted' || 
+                              (currentResult.userAnswer as UserCodingAnswer).compilation_status === 'Correct'
+                                ? 'text-green-600' 
+                                : 'text-red-600'
+                            }`}>
+                              {(currentResult.userAnswer as UserCodingAnswer).compilation_status || 'Not Submitted'}
+                            </p>
+                            {(currentResult.userAnswer as UserCodingAnswer).ai_feedback && (
+                              <div className="mt-2">
+                                <h6 className="text-xs font-medium text-gray-600">AI Feedback:</h6>
+                                <p className="text-xs text-gray-700 mt-1">
+                                  {(currentResult.userAnswer as UserCodingAnswer).ai_feedback}
+                                </p>
+                              </div>
                             )}
-                            {isSelectedAnswer && (
-                              <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                                isCorrectAnswer 
-                                  ? 'bg-green-100 text-green-800' 
-                                  : 'bg-red-100 text-red-800'
-                              }`}>
-                                Your Answer
-                              </span>
+                            {(currentResult.userAnswer as UserCodingAnswer).execution_time && (
+                              <div className="mt-1">
+                                <span className="text-xs text-gray-500">
+                                  Execution: {(currentResult.userAnswer as UserCodingAnswer).execution_time}ms
+                                  {(currentResult.userAnswer as UserCodingAnswer).memory_used && 
+                                    `, Memory: ${(currentResult.userAnswer as UserCodingAnswer).memory_used}KB`
+                                  }
+                                </span>
+                              </div>
                             )}
                           </div>
                         </div>
                       </div>
-                    )
-                  })}
-                </div>
-
-                {/* Answer Summary */}
-                <div className="border-t pt-4">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-700 mb-2">Your Answer:</h4>
-                      <p className={`text-sm font-medium ${
-                        !currentResult.userAnswer?.selected_answer 
-                          ? 'text-gray-500 italic' 
-                          : currentResult.isCorrect 
-                          ? 'text-green-600' 
-                          : 'text-red-600'
-                      }`}>
-                        {currentResult.userAnswer?.selected_answer 
-                          ? `${currentResult.userAnswer.selected_answer}. ${getOptionText(currentResult.question, currentResult.userAnswer.selected_answer)}`
-                          : 'No answer provided-> Auto Submitted the test bcoz you either exited the full screen mode or we detected tab switch'
-                        }
-                      </p>
                     </div>
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-700 mb-2">Correct Answer:</h4>
-                      <p className="text-sm text-green-600 font-medium">
-                        {currentResult.question.correct_answer}. {getOptionText(currentResult.question, currentResult.question.correct_answer)}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="text-sm font-semibold text-gray-700 mb-2">Result:</h4>
-                      <p className={`text-sm font-medium ${
-                        currentResult.isCorrect ? 'text-green-600' : 'text-red-600'
-                      }`}>
-                        {currentResult.isCorrect ? 'Correct ✓' : 'Incorrect ✗'} 
-                        <br />
-                        <span className="text-xs text-gray-600">
-                          {currentResult.pointsEarned}/{currentResult.totalPoints} points
-                        </span>
-                      </p>
-                    </div>
-                  </div>
-                </div>
+                  </>
+                )}
               </div>
             )}
 
@@ -533,19 +795,23 @@ export default function TestResultsPage() {
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                 <div className="text-center p-4 bg-blue-50 rounded-lg">
                   <div className="text-2xl font-bold text-blue-600">{correctAnswers}</div>
-                  <div className="text-sm text-gray-600">Correct Answers</div>
+                  <div className="text-sm text-gray-600">
+                    {attempt.test.test_type === 'mcq' ? 'Correct Answers' : 'Accepted Solutions'}
+                  </div>
                 </div>
                 <div className="text-center p-4 bg-red-50 rounded-lg">
                   <div className="text-2xl font-bold text-red-600">{totalQuestions - correctAnswers}</div>
-                  <div className="text-sm text-gray-600">Incorrect Answers</div>
+                  <div className="text-sm text-gray-600">
+                    {attempt.test.test_type === 'mcq' ? 'Incorrect Answers' : 'Failed Solutions'}
+                  </div>
                 </div>
                 <div className="text-center p-4 bg-green-50 rounded-lg">
-                  <div className="text-2xl font-bold text-green-600">{attempt.score}</div>
+                  <div className="text-2xl font-bold text-green-600">{actualPointsEarned}</div>
                   <div className="text-sm text-gray-600">Points Earned</div>
                 </div>
                 <div className="text-center p-4 bg-purple-50 rounded-lg">
                   <div className="text-2xl font-bold text-purple-600">
-                    {calculatePercentage(attempt.score, totalPossiblePoints)}%
+                    {calculatePercentage(actualPointsEarned, totalPossiblePoints)}%
                   </div>
                   <div className="text-sm text-gray-600">Overall Score</div>
                 </div>

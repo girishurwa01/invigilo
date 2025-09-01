@@ -75,7 +75,7 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
         const model = genAI.getGenerativeModel({ 
             model: 'gemini-1.5-flash',
             generationConfig: {
-                temperature: 0.2, // Slightly increased for more nuanced feedback
+                temperature: 0.2,
                 topP: 0.9,
                 topK: 40,
                 maxOutputTokens: 1024,
@@ -85,7 +85,6 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
         const languageNames = { 50: 'C', 54: 'C++', 62: 'Java', 63: 'JavaScript', 71: 'Python' }
         const languageName = languageNames[languageId as keyof typeof languageNames] || 'Unknown Language'
         
-        // MODIFIED PROMPT: Removed strict, punitive language. Focused on fair grading.
         const prompt = `
           Your task is to act as a fair and helpful programming instructor. Grade the user's code solution for the given problem.
 
@@ -135,13 +134,18 @@ async function evaluateWithAI(userCode: string, languageId: number, question: Qu
             throw new Error('Invalid total_score in AI response')
         }
 
-        // MODIFICATION: Removed the strict post-evaluation logic. We will trust the AI's score.
-        const { total_score, feedback, suggestions } = parsed
+        const { total_score, feedback, suggestions } = parsed;
+
+        // Ensure suggestions is always a string to prevent frontend errors
+        const finalSuggestions = Array.isArray(suggestions)
+          ? suggestions.join(' ')
+          : suggestions || 'Keep practicing!';
+
 
         return {
             total_score: Math.min(total_score, question.points), // Ensure score doesn't exceed max points
             overall_feedback: feedback || 'Evaluation completed.',
-            suggestions: suggestions || 'Keep practicing!'
+            suggestions: finalSuggestions,
         }
         
     } catch (error: unknown) {
@@ -163,7 +167,6 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
         }
 
-        // Apply Pre-check 1: Validate for substantial code
         if (!isCodeSubstantial(userCode)) {
             console.log('Submission failed pre-check: No substantial code found.')
             return NextResponse.json({
@@ -189,7 +192,6 @@ export async function POST(request: Request) {
             console.log('Step 1: Judge0 compilation check')
             const judgeResult = await runOnJudge0(languageId, userCode)
             
-            // Statuses 1 (In Queue), 2 (Processing), and 3 (Accepted) mean it compiled.
             if (judgeResult.status.id <= 3) {
                 compilationStatus = 'Accepted'
                 executionTime = judgeResult.time ? parseFloat(judgeResult.time) * 1000 : 0
@@ -212,7 +214,6 @@ export async function POST(request: Request) {
         } catch (aiError) {
             console.error('AI evaluation failed:', aiError)
             
-            // MODIFICATION: More lenient fallback scoring. Give 1 point if it compiles.
             totalScore = (compilationStatus === 'Accepted' && question.points > 0) ? 1 : 0
             aiFeedback = {
                 total_score: totalScore,
@@ -243,4 +244,3 @@ export async function POST(request: Request) {
         }, { status: 500 })
     }
 }
-

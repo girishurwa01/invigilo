@@ -104,15 +104,14 @@ export default function TakeCodingTestMain() {
   const [testSubmitted, setTestSubmitted] = useState(false)
   const [runningCode, setRunningCode] = useState(false)
   const [testResults, setTestResults] = useState<TestResult | null>(null)
-  const [currentAttemptId, setCurrentAttemptId] = useState<string | null>(null)
+  const [showWarning, setShowWarning] = useState<'fullscreen' | 'visibility' | null>(null)
+  const [countdown, setCountdown] = useState(10)
+  const [warningTimer, setWarningTimer] = useState<NodeJS.Timeout | null>(null)
   const submissionInProgress = useRef(false)
   const router = useRouter()
 
   const loadTestData = useCallback(async (userId: string) => {
     try {
-      console.log('Loading coding test data for user:', userId, 'test code:', code)
-      
-      // Get test information
       const { data: test, error: testError } = await supabase
         .from('tests')
         .select('*')
@@ -125,404 +124,217 @@ export default function TakeCodingTestMain() {
         throw new Error('Coding test not found or inactive')
       }
 
-      // Check for existing completed attempts
+      // Check if user has ALREADY COMPLETED this test
       const { data: attempts, error: attemptError } = await supabase
         .from('test_attempts')
-        .select('id, completed_at, score')
+        .select('id')
         .eq('test_id', test.id)
         .eq('user_id', userId)
         .not('completed_at', 'is', null)
-        .order('completed_at', { ascending: false })
+        .limit(1)
 
-      if (attemptError && attemptError.code !== 'PGRST116') {
+      if (attemptError) {
         throw new Error(attemptError.message)
       }
 
       if (attempts && attempts.length > 0) {
         setError('You have already completed this coding test. Redirecting to view your marks.')
-        setTimeout(() => {
-          router.push('/view-marks')
-        }, 2000)
+        setTimeout(() => router.push('/view-marks'), 2000)
         return
       }
-
-const { data: existingAttempts } = await supabase
-  .from('test_attempts')
-  .select('id, answers, started_at, completed_at')
-  .eq('test_id', test.id)
-  .eq('user_id', userId)
-  .order('started_at', { ascending: false })
-  .limit(1)
-
-const existingAttempt = existingAttempts && existingAttempts.length > 0 ? existingAttempts[0] : null
-
-      // Get questions from coding_questions table
+      
       const { data: questionsData, error: questionsError } = await supabase
         .from('coding_questions')
         .select('*')
         .eq('test_id', test.id)
         .order('question_number')
 
-      if (questionsError) {
-        console.error('Error loading questions:', questionsError)
-        throw new Error(`Error loading coding questions: ${questionsError.message}`)
-      }
-
-      if (!questionsData || questionsData.length === 0) {
-        throw new Error(`No questions found for this coding test (test_id: ${test.id}). Please ensure questions have been created for this test.`)
+      if (questionsError || !questionsData || questionsData.length === 0) {
+        throw new Error('No questions found for this coding test.')
       }
 
       setTestData(test)
       setQuestions(questionsData)
       
-      // Initialize user answers
-      if (existingAttempt && !existingAttempt.completed_at) {
-        // Resume from saved progress
-        const savedAnswers = existingAttempt.answers as UserCodingAnswer[] || []
-        
-        // Ensure all questions have answers
-        const completeAnswers = questionsData.map(q => {
-          const savedAnswer = savedAnswers.find(sa => sa.question_id === q.id)
-          return savedAnswer || {
-            question_id: q.id,
-            code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
-            compilation_status: 'Not Submitted',
-            points_earned: 0
-          }
-        })
-        
-        setUserAnswers(completeAnswers)
-        setCurrentAttemptId(existingAttempt.id)
-        
-        // Calculate remaining time
-        const startedAt = new Date(existingAttempt.started_at).getTime()
-        const elapsed = (Date.now() - startedAt) / 1000
-        const remaining = Math.max(0, test.time_limit * 60 - elapsed)
-        setTimeLeft(Math.floor(remaining))
-        
-        console.log('Resumed test with remaining time:', Math.floor(remaining))
-      } else {
-        // Start fresh or existing attempt was completed
-        const initialAnswers = questionsData.map(q => ({
-          question_id: q.id,
-          code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
-          compilation_status: 'Not Submitted',
-          points_earned: 0
-        }))
-        setUserAnswers(initialAnswers)
-        setTimeLeft(test.time_limit * 60)
-        
-        // If there was a completed attempt, clear it for a fresh start
-        if (existingAttempt && existingAttempt.completed_at) {
-          setCurrentAttemptId(null)
-        } else if (existingAttempt) {
-          setCurrentAttemptId(existingAttempt.id)
-        }
-      }
+      // Always start fresh, no resume functionality
+      const initialAnswers = questionsData.map(q => ({
+        question_id: q.id,
+        code_submission: DEFAULT_CODE_TEMPLATES[q.language_id] || '',
+        compilation_status: 'Not Submitted',
+        points_earned: 0
+      }))
+      setUserAnswers(initialAnswers)
+      setTimeLeft(test.time_limit * 60)
       
-      setLoading(false)
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-      console.error('Error loading coding test:', error)
+    } catch (err: unknown) {
+      const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       setError(`Error loading coding test: ${errorMessage}`)
-      setLoading(false)
+    } finally {
+        setLoading(false)
     }
   }, [code, router])
 
-const createOrUpdateAttempt = useCallback(async () => {
-  if (!user || !testData) return null
+  const submitTest = useCallback(async (reason: 'timeUp' | 'fullscreenExit' | 'visibilityExit' | 'manual' = 'timeUp') => {
+    if (submissionInProgress.current || testSubmitted || !user || !testData) {
+      return;
+    }
+  
+    console.log('Submitting coding test due to:', reason);
+    submissionInProgress.current = true;
+    setSubmitting(true);
+    setTestSubmitted(true);
 
-  try {
-    if (currentAttemptId) {
-      // Update existing attempt with current answers and calculated score
-      const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
-      
-      const { error } = await supabase
+    // Clear any active warning timer
+    if (warningTimer) {
+      clearInterval(warningTimer);
+      setWarningTimer(null);
+    }
+  
+    try {
+      const totalScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0);
+      const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60);
+
+      // Step 1: Create the single, final test_attempts record
+      const { data: newAttempt, error: attemptError } = await supabase
         .from('test_attempts')
-        .update({ 
+        .insert({
+          test_id: testData.id,
+          user_id: user.id,
+          score: totalScore,
+          total_questions: questions.length,
+          time_taken: timeTaken,
+          completed_at: new Date().toISOString(),
           answers: userAnswers,
-          score: currentScore // Update score in real-time
         })
-        .eq('id', currentAttemptId)
+        .select('id')
+        .single();
+
+      if (attemptError) {
+        if (attemptError.code === '23505') { // Handle unique constraint violation
+            throw new Error("You have already submitted this test.");
+        }
+        throw new Error(`Failed to create test attempt record: ${attemptError.message}`);
+      }
       
-      if (error) throw error
-      console.log('Updated attempt with current score:', currentScore)
-      return currentAttemptId
-    } else {
-      // Check if attempt already exists for this user and test
-      const { data: existingAttempt, error: findError } = await supabase
-        .from('test_attempts')
-        .select('id, completed_at')
-        .eq('test_id', testData.id)
-        .eq('user_id', user.id)
-        .order('started_at', { ascending: false })
-        .limit(1)
+      const attemptId = newAttempt.id;
 
-      if (findError && findError.code !== 'PGRST116') {
-        throw findError
-      }
-
-      if (existingAttempt && existingAttempt.length > 0) {
-        // Use existing attempt if not completed
-        if (!existingAttempt[0].completed_at) {
-          setCurrentAttemptId(existingAttempt[0].id)
-          console.log('Using existing uncompleted attempt:', existingAttempt[0].id)
-          return existingAttempt[0].id
-        } else {
-          throw new Error('Test has already been completed')
-        }
-      } else {
-        // Create new attempt
-        const currentScore = userAnswers.reduce((sum, answer) => sum + (answer.points_earned || 0), 0)
-        
-        const { data: attempt, error: createError } = await supabase
-          .from('test_attempts')
-          .insert({
-            test_id: testData.id,
-            user_id: user.id,
-            score: currentScore,
-            total_questions: questions.length,
-            time_taken: 0, // Will be updated on submission
-            answers: userAnswers,
-            started_at: new Date().toISOString(),
-            completed_at: null
-          })
-          .select('id')
-          .single()
-
-        if (createError) {
-          console.error('Error creating attempt:', createError)
-          throw new Error(`Failed to create test attempt: ${createError.message}`)
-        }
-
-        setCurrentAttemptId(attempt.id)
-        console.log('Created new attempt with score:', currentScore)
-        return attempt.id
-      }
-    }
-  } catch (error) {
-    console.error('Error creating/updating attempt:', error)
-    return null
-  }
-}, [user, testData, questions.length, userAnswers, currentAttemptId])
-
-const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') => {
-  if (submissionInProgress.current || testSubmitted || !user || !testData) {
-    console.log('Submission blocked:', { submissionInProgress: submissionInProgress.current, testSubmitted, user: !!user, testData: !!testData })
-    return
-  }
-
-  console.log('Submitting coding test due to:', reason)
-  submissionInProgress.current = true
-  setSubmitting(true)
-  setTestSubmitted(true)
-
-  try {
-    let attemptId = currentAttemptId
-
-    // Calculate total score from individual question scores
-    const totalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => {
-      return sum + (answer.points_earned || 0)
-    }, 0)
-
-    const timeTaken = Math.ceil((testData.time_limit * 60 - timeLeft) / 60)
+      // Step 2: Save all individual coding answers linked to the new attemptId
+      const answersToInsert = userAnswers.map(answer => ({
+          attempt_id: attemptId,
+          question_id: answer.question_id,
+          code_submission: answer.code_submission || '',
+          compilation_status: answer.compilation_status || 'Not Submitted',
+          execution_time: answer.execution_time || null,
+          memory_used: answer.memory_used || null,
+          points_earned: answer.points_earned || 0,
+          ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null,
+      }));
+      
+      if (answersToInsert.length > 0) {
+          const { error: answersError } = await supabase
+            .from('user_coding_answers')
+            .insert(answersToInsert);
     
-    console.log('Final submission - Total score:', totalScore)
-    console.log('Time taken:', timeTaken, 'minutes')
-
-    // Handle attempt creation/update more robustly
-    if (!attemptId) {
-      // Try to find existing uncompleted attempt first
-      const { data: existingAttempts, error: findError } = await supabase
-        .from('test_attempts')
-        .select('id, completed_at')
-        .eq('test_id', testData.id)
-        .eq('user_id', user.id)
-        .is('completed_at', null)
-        .order('started_at', { ascending: false })
-        .limit(1)
-
-      if (findError) {
-        console.error('Error finding existing attempt:', findError)
-      }
-
-      if (existingAttempts && existingAttempts.length > 0) {
-        attemptId = existingAttempts[0].id
-        setCurrentAttemptId(attemptId)
-        console.log('Found existing uncompleted attempt:', attemptId)
-      } else {
-        // Create new attempt
-        const { data: newAttempt, error: createError } = await supabase
-          .from('test_attempts')
-          .insert({
-            test_id: testData.id,
-            user_id: user.id,
-            score: 0,
-            total_questions: questions.length,
-            time_taken: 0,
-            answers: userAnswers,
-            started_at: new Date().toISOString(),
-            completed_at: null
-          })
-          .select('id')
-          .single()
-
-        if (createError) {
-          console.error('Error creating attempt:', createError)
-          throw new Error(`Failed to create test attempt: ${createError.message}`)
-        }
-
-        attemptId = newAttempt.id
-        setCurrentAttemptId(attemptId)
-        console.log('Created new attempt:', attemptId)
-      }
-    }
-
-    // Verify the attempt exists and is not completed
-    const { data: existingAttempt, error: attemptVerifyError } = await supabase
-      .from('test_attempts')
-      .select('id, completed_at')
-      .eq('id', attemptId)
-
-    if (attemptVerifyError) {
-      console.error('Attempt verification failed:', attemptVerifyError)
-      throw new Error('Failed to verify test attempt')
-    }
-
-    if (!existingAttempt || existingAttempt.length === 0) {
-      throw new Error('Test attempt not found. Please refresh and try again.')
-    }
-
-    if (existingAttempt[0].completed_at) {
-      throw new Error('This test has already been submitted.')
-    }
-
-    // Save all individual answers first
-    for (const answer of userAnswers) {
-      const question = questions.find(q => q.id === answer.question_id)
-      if (!question) continue
-
-      const answerData = {
-        attempt_id: attemptId,
-        question_id: answer.question_id,
-        code_submission: answer.code_submission || '',
-        compilation_status: answer.compilation_status || 'Not Submitted',
-        execution_time: answer.execution_time || null,
-        memory_used: answer.memory_used || null,
-        points_earned: answer.points_earned || 0,
-        ai_feedback: answer.ai_feedback ? JSON.stringify(answer.ai_feedback) : null
-      }
-
-      const { error } = await supabase
-        .from('user_coding_answers')
-        .upsert(answerData, {
-          onConflict: 'attempt_id,question_id'
-        })
-      
-      if (error) {
-        console.error('Error saving coding answer:', error)
-        throw new Error(`Failed to save answer for question ${answer.question_id}: ${error.message}`)
-      } else {
-        console.log('Saved answer for question:', answer.question_id, 'with points:', answer.points_earned)
-      }
-    }
-
-    // Update the attempt as completed with final score - SIMPLIFIED
-    const { error: updateError } = await supabase
-      .from('test_attempts')
-      .update({ 
-        score: totalScore,
-        time_taken: timeTaken,
-        completed_at: new Date().toISOString(),
-        answers: userAnswers
-      })
-      .eq('id', attemptId)
-
-    if (updateError) {
-      console.error('Error updating test attempt:', updateError)
-      throw new Error('Failed to save test completion: ' + updateError.message)
-    }
-
-    // Verify the update by fetching the record
-    const { data: verifyUpdate, error: updateVerifyError } = await supabase
-      .from('test_attempts')
-      .select('completed_at, score')
-      .eq('id', attemptId)
-      .single()
-
-    if (updateVerifyError || !verifyUpdate || !verifyUpdate.completed_at) {
-      throw new Error('Test completion verification failed')
-    }
-
-    console.log('Successfully marked test as completed with score:', totalScore)
-    console.log('Verification - completed_at:', verifyUpdate.completed_at, 'score:', verifyUpdate.score)
-
-    // Ensure score synchronization
-    const ensureScoreSync = async (attemptId: string, totalScore: number) => {
-      try {
-        // Verify the score was saved correctly
-        const { data: attemptCheck, error: checkError } = await supabase
-          .from('test_attempts')
-          .select('score, completed_at')
-          .eq('id', attemptId)
-          .single()
-
-        if (checkError) {
-          console.error('Failed to verify attempt score:', checkError)
-          return false
-        }
-
-        console.log('Database verification - stored score:', attemptCheck.score, 'calculated score:', totalScore)
-
-        // If scores don't match, update again
-        if (attemptCheck.score !== totalScore) {
-          console.log('Score mismatch detected, updating...')
-          const { error: syncError } = await supabase
-            .from('test_attempts')
-            .update({ score: totalScore })
-            .eq('id', attemptId)
-
-          if (syncError) {
-            console.error('Failed to sync score:', syncError)
-            return false
+          if (answersError) {
+            console.error(`Failed to save detailed answers, but the main attempt was recorded:`, answersError);
           }
-          
-          console.log('Score synchronized successfully')
-        }
-
-        return true
-      } catch (error) {
-        console.error('Error in score synchronization:', error)
-        return false
       }
+  
+      console.log(`Test submitted successfully. Final Score: ${totalScore}`);
+      
+      const totalPossibleScore = questions.reduce((sum, q) => sum + q.points, 0);
+      alert(
+        reason === 'timeUp'
+          ? `Time&apos;s up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
+          : reason === 'fullscreenExit'
+          ? `Test submitted due to exiting full screen mode. Score: ${totalScore}/${totalPossibleScore}`
+          : reason === 'visibilityExit'
+          ? `Test submitted due to switching tabs/windows (Alt+Tab detected). Score: ${totalScore}/${totalPossibleScore}`
+          : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
+      );
+  
+      router.push('/view-marks');
+  
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      console.error('Error submitting coding test:', error);
+      alert(`Error submitting test: ${errorMessage}`);
+      submissionInProgress.current = false;
+      setSubmitting(false);
+      setTestSubmitted(false);
+    }
+  }, [user, testData, userAnswers, timeLeft, questions, router, testSubmitted, warningTimer]);
+
+  const startWarningCountdown = useCallback((warningType: 'fullscreen' | 'visibility') => {
+    if (testSubmitted || submissionInProgress.current) {
+      console.log('Test already submitted, ignoring warning')
+      return
     }
 
-    if (attemptId) {
-      await ensureScoreSync(attemptId, totalScore)
-    }
-
-    const totalPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + (q.points || 5), 0)
+    console.log('Starting warning countdown for:', warningType)
+    setShowWarning(warningType)
+    setCountdown(10)
     
-    alert(
-      reason === 'timeUp'
-        ? `Time's up! Your coding test was submitted automatically. Score: ${totalScore}/${totalPossibleScore}`
-        : `Coding test submitted successfully. Score: ${totalScore}/${totalPossibleScore}`
-    )
+    // Clear any existing timer
+    if (warningTimer) {
+      clearInterval(warningTimer)
+    }
 
-    // Wait a moment before redirecting to ensure all database operations complete
-    setTimeout(() => {
-      router.push('/view-marks')
-    }, 2000)
+    // Start new countdown timer
+    const timer = setInterval(() => {
+      setCountdown(prev => {
+        console.log('Countdown:', prev - 1)
+        if (prev <= 1) {
+          console.log('Countdown reached 0, submitting test')
+          clearInterval(timer)
+          setWarningTimer(null)
+          submitTest(warningType === 'fullscreen' ? 'fullscreenExit' : 'visibilityExit')
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+    
+    setWarningTimer(timer)
+  }, [submitTest, warningTimer, testSubmitted])
 
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
-    console.error('Error submitting coding test:', error)
-    alert(`Error submitting test: ${errorMessage}`)
-    submissionInProgress.current = false
-    setSubmitting(false)
-    setTestSubmitted(false)
+  const clearWarning = useCallback(() => {
+    console.log('Clearing warning')
+    setShowWarning(null)
+    if (warningTimer) {
+      clearInterval(warningTimer)
+      setWarningTimer(null)
+    }
+  }, [warningTimer])
+
+  const enterFullscreen = () => {
+    const elem = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+      msRequestFullscreen?: () => Promise<void>;
+    }
+    if (elem.requestFullscreen) {
+      elem.requestFullscreen().catch((err: Error) => console.error('Fullscreen error:', err))
+    } else if (elem.webkitRequestFullscreen) {
+      elem.webkitRequestFullscreen()
+    } else if (elem.msRequestFullscreen) {
+      elem.msRequestFullscreen()
+    }
   }
-}, [testSubmitted, user, testData, userAnswers, questions, timeLeft, router, currentAttemptId, createOrUpdateAttempt])
+
+  const isFullscreen = () => {
+    return !!(
+      document.fullscreenElement ||
+      (document as Document & {
+        webkitFullscreenElement?: Element;
+        msFullscreenElement?: Element;
+      }).webkitFullscreenElement ||
+      (document as Document & {
+        webkitFullscreenElement?: Element;
+        msFullscreenElement?: Element;
+      }).msFullscreenElement
+    )
+  }
+  
   useEffect(() => {
     const getSession = async () => {
       try {
@@ -556,6 +368,48 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
     return () => subscription.unsubscribe()
   }, [router, loadTestData])
 
+  // Enter fullscreen when test starts
+  useEffect(() => {
+    if (testStarted) {
+      enterFullscreen()
+    }
+  }, [testStarted])
+
+  // Monitor fullscreen and visibility changes
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      if (!isFullscreen() && testStarted && !submitting && !testSubmitted) {
+        console.log('Fullscreen exited, starting warning')
+        startWarningCountdown('fullscreen')
+      } else if (isFullscreen() && showWarning === 'fullscreen') {
+        console.log('Returned to fullscreen, clearing warning')
+        clearWarning()
+      }
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden && testStarted && !submitting && !testSubmitted) {
+        console.log('Tab/window hidden (Alt+Tab detected), starting warning')
+        startWarningCountdown('visibility')
+      } else if (!document.hidden && showWarning === 'visibility') {
+        console.log('Returned to tab/window, clearing warning')
+        clearWarning()
+      }
+    }
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange)
+    document.addEventListener('msfullscreenchange', handleFullscreenChange)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange)
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange)
+      document.removeEventListener('msfullscreenchange', handleFullscreenChange)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [testStarted, submitting, testSubmitted, showWarning, startWarningCountdown, clearWarning])
+
   useEffect(() => {
     if (!testStarted || timeLeft <= 0 || testSubmitted) return
 
@@ -571,6 +425,27 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
 
     return () => clearInterval(timer)
   }, [testStarted, timeLeft, testSubmitted, submitTest])
+
+  // Prevent browser refresh/close during test
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (testStarted && !submitting && !testSubmitted) {
+        e.preventDefault()
+        e.returnValue = 'Your coding test progress will be lost. Are you sure you want to leave?'
+      }
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [testStarted, submitting, testSubmitted])
+
+  // Cleanup timer on component unmount
+  useEffect(() => {
+    return () => {
+      if (warningTimer) {
+        clearInterval(warningTimer)
+      }
+    }
+  }, [warningTimer])
 
   const formatTime = (seconds: number) => {
     const mins = Math.floor(seconds / 60)
@@ -598,7 +473,6 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
       return
     }
 
-    // Check if code is just the default template
     const defaultTemplate = DEFAULT_CODE_TEMPLATES[currentQ.language_id]
     if (currentAnswer.code_submission.trim() === defaultTemplate?.trim()) {
       alert('Please modify the code before running!')
@@ -609,11 +483,6 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
     setTestResults(null)
 
     try {
-      // Ensure we have an attempt record first
-      if (!currentAttemptId) {
-        await createOrUpdateAttempt()
-      }
-
       const response = await fetch('/api/grade-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -630,7 +499,6 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
         
         const pointsEarned = Math.max(0, Math.min(currentQ.points, result.totalScore || 0))
         
-        // Update user answer with test results
         setUserAnswers((prev: UserCodingAnswer[]) => {
           const updated = prev.map((ua: UserCodingAnswer) =>
             ua.question_id === currentQ.id ? {
@@ -642,55 +510,10 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
               ai_feedback: result.aiFeedback
             } : ua
           )
+          console.log(`Updated local score for Q${currentQuestion + 1} to ${pointsEarned}`);
           return updated
         })
 
-        // Save this individual question's answer immediately
-        if (currentAttemptId) {
-          const answerData = {
-            attempt_id: currentAttemptId,
-            question_id: currentQ.id,
-            code_submission: currentAnswer.code_submission,
-            compilation_status: result.compilationStatus,
-            execution_time: result.executionTime || null,
-            memory_used: result.memoryUsed || null,
-            points_earned: pointsEarned,
-            ai_feedback: JSON.stringify(result.aiFeedback)
-          }
-
-          // Use upsert to handle the unique constraint
-          const { error } = await supabase
-            .from('user_coding_answers')
-            .upsert(answerData, {
-              onConflict: 'attempt_id,question_id'
-            })
-          
-          if (error) {
-            console.error('Error saving individual answer:', error)
-          } else {
-            console.log('Saved answer for question:', currentQ.id, 'with points:', pointsEarned)
-          }
-
-          // Calculate the new total score
-          const totalScore = userAnswers.reduce((sum: number, ua: UserCodingAnswer) => {
-            if (ua.question_id === currentQ.id) {
-              return sum + pointsEarned
-            }
-            return sum + (ua.points_earned || 0)
-          }, 0)
-
-          // Update the attempt with the new total score
-          const { error: scoreUpdateError } = await supabase
-            .from('test_attempts')
-            .update({ score: totalScore })
-            .eq('id', currentAttemptId)
-
-          if (scoreUpdateError) {
-            console.error('Error updating total score:', scoreUpdateError)
-          } else {
-            console.log('Updated total score in test_attempts:', totalScore)
-          }
-        }
       } else {
         const error = await response.json()
         alert(`Error running code: ${error.error}`)
@@ -702,33 +525,6 @@ const submitTest = useCallback(async (reason: 'timeUp' | 'manual' = 'timeUp') =>
       setRunningCode(false)
     }
   }
-
-
-const saveProgress = useCallback(async () => {
-  if (!user || !testData || testSubmitted || submissionInProgress.current) return // Added submissionInProgress check
-
-  try {
-    await createOrUpdateAttempt()
-    console.log('Progress auto-saved')
-  } catch (error) {
-    console.error('Error saving progress:', error)
-  }
-}, [user, testData, testSubmitted, createOrUpdateAttempt])
-
-  // Auto-save progress every 30 seconds
-  useEffect(() => {
-    if (!testStarted || testSubmitted) return
-
-    const saveInterval = setInterval(saveProgress, 30000)
-    return () => clearInterval(saveInterval)
-  }, [testStarted, testSubmitted, saveProgress])
-
-  // Create attempt when test starts
-  useEffect(() => {
-    if (testStarted && !currentAttemptId && user && testData) {
-      createOrUpdateAttempt()
-    }
-  }, [testStarted, currentAttemptId, user, testData, createOrUpdateAttempt])
 
   if (loading) {
     return (
@@ -789,38 +585,19 @@ const saveProgress = useCallback(async () => {
               </div>
             </div>
             
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 mb-8 text-left">
-              <h3 className="font-semibold text-blue-800 mb-3">Coding Test Instructions</h3>
-              <ul className="text-sm text-blue-700 space-y-2">
+            <div className="bg-red-50 border border-red-200 rounded-lg p-6 mb-8 text-left">
+              <h3 className="font-semibold text-red-800 mb-3">⚠️ Important Instructions</h3>
+              <ul className="text-sm text-red-700 space-y-2">
+                <li>• Once started, the timer cannot be paused</li>
                 <li>• Write code in the provided editor for each question</li>
                 <li>• Test your code using the &apos;Run & Grade&apos; button to see your score</li>
-                <li>• Your code will be evaluated by AI based on multiple criteria</li>
                 <li>• Each question has its own point value and programming language</li>
                 <li>• You can navigate between questions freely</li>
-                <li>• Your progress is auto-saved every 30 seconds</li>
-                <li>• Submit before time runs out to avoid losing your work</li>
+                <li>• Submit your test before the timer runs out</li>
+                <li>• Do not refresh or close the browser</li>
+                <li>• The test must be taken in full screen mode</li>
+                <li>• Do not use Alt+Tab or switch tabs/windows, or the test will be auto-submitted in 10 seconds</li>
               </ul>
-            </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8 text-sm">
-              <div className="bg-green-50 p-4 rounded-lg">
-                <h4 className="font-semibold text-green-800 mb-2">Supported Languages</h4>
-                <div className="text-green-700 space-y-1">
-                  {Array.from(new Set(questions.map(q => q.language_id))).map(langId => (
-                    <div key={langId}>• {LANGUAGE_NAMES[langId]}</div>
-                  ))}
-                </div>
-              </div>
-              <div className="bg-yellow-50 p-4 rounded-lg">
-                <h4 className="font-semibold text-yellow-800 mb-2">AI Evaluation Criteria</h4>
-                <div className="text-yellow-700 space-y-1">
-                  <div>• Correctness (40%)</div>
-                  <div>• Code Quality (25%)</div>
-                  <div>• Efficiency (20%)</div>
-                  <div>• Syntax & Compilation (10%)</div>
-                  <div>• Problem Understanding (5%)</div>
-                </div>
-              </div>
             </div>
             
             <button
@@ -838,13 +615,11 @@ const saveProgress = useCallback(async () => {
   const currentQ = questions[currentQuestion]
   const currentAnswer = userAnswers.find(ua => ua.question_id === currentQ?.id)
 
-  // Calculate current total score for display
   const currentTotalScore = userAnswers.reduce((sum: number, answer: UserCodingAnswer) => sum + (answer.points_earned || 0), 0)
   const maxPossibleScore = questions.reduce((sum: number, q: CodingQuestion) => sum + q.points, 0)
 
   return (
     <div className="min-h-screen bg-gray-100">
-      {/* Header */}
       <div className="bg-white shadow-lg sticky top-0 z-10">
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex justify-between items-center">
@@ -889,7 +664,6 @@ const saveProgress = useCallback(async () => {
 
       <div className="max-w-7xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Question Navigator */}
           <div className="lg:col-span-1">
             <div className="bg-white rounded-lg shadow-md p-4 sticky top-24">
               <h3 className="font-semibold text-gray-900 mb-4">Questions</h3>
@@ -959,9 +733,7 @@ const saveProgress = useCallback(async () => {
             </div>
           </div>
 
-          {/* Main Content */}
           <div className="lg:col-span-3 space-y-6">
-            {/* Problem Statement */}
             <div className="bg-white rounded-lg shadow-md p-6">
               <div className="flex justify-between items-start mb-4">
                 <span className="bg-green-100 text-green-800 text-sm font-medium px-3 py-1 rounded">
@@ -979,7 +751,6 @@ const saveProgress = useCallback(async () => {
               </div>
             </div>
 
-            {/* Code Editor */}
             <div className="bg-white rounded-lg shadow-md p-6">
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-lg font-medium text-gray-900">Code Editor</h3>
@@ -1015,7 +786,6 @@ const saveProgress = useCallback(async () => {
               />
             </div>
 
-            {/* Detailed AI Feedback */}
             {testResults && testResults.aiFeedback && testResults.aiFeedback.detailed_feedback && (
               <div className="bg-white rounded-lg shadow-md p-6">
                 <h3 className="text-lg font-medium text-gray-900 mb-4">Detailed AI Evaluation</h3>
@@ -1037,7 +807,6 @@ const saveProgress = useCallback(async () => {
               </div>
             )}
 
-            {/* Navigation */}
             <div className="bg-white rounded-lg shadow-md p-6">
               <div className="flex justify-between">
                 <button
@@ -1073,6 +842,46 @@ const saveProgress = useCallback(async () => {
           </div>
         </div>
       </div>
+
+      {/* Warning Modal */}
+      {showWarning && !testSubmitted && (
+        <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
+          <div className="bg-white p-8 rounded-lg shadow-xl text-center max-w-md w-full mx-4">
+            <div className="text-6xl mb-4">⚠️</div>
+            <h2 className="text-2xl font-bold text-red-600 mb-4">
+              {showWarning === 'fullscreen' ? 'Full Screen Required!' : 'Return to Test!'}
+            </h2>
+            <p className="text-gray-800 mb-6 text-lg">
+              {showWarning === 'fullscreen'
+                ? 'Return to full screen mode'
+                : 'Alt+Tab detected! Return to the test window'}
+              {' or your coding test will be automatically submitted in:'}
+            </p>
+            <div className="text-6xl font-bold text-red-600 mb-6 animate-pulse">
+              {countdown}
+            </div>
+            <p className="text-sm text-gray-600 mb-6">
+              {countdown <= 3 && (
+                <span className="font-bold text-red-600 animate-pulse">
+                  🚨 FINAL WARNING: {countdown} seconds remaining! 🚨
+                </span>
+              )}
+            </p>
+            <button
+              onClick={() => {
+                if (showWarning === 'fullscreen') {
+                  enterFullscreen()
+                } else {
+                  window.focus()
+                }
+              }}
+              className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-lg font-medium text-lg"
+            >
+              {showWarning === 'fullscreen' ? '↗️ Return to Full Screen' : '↗️ Return to Test'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
